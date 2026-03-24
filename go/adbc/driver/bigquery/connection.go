@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/bigquery"
@@ -40,6 +41,14 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
+
+// newClientMu serializes concurrent BigQuery client initialization.
+// bigquery.NewClient and EnableStorageReadClient are not safe to call
+// concurrently when using Application Default Credentials: they both
+// trigger ADC discovery (including user.Current() via CGo / getpwuid_r)
+// and gRPC global state initialization, which race when invoked from
+// multiple OS threads simultaneously.
+var newClientMu sync.Mutex
 
 type connectionImpl struct {
 	driverbase.ConnectionImplBase
@@ -501,6 +510,9 @@ func (c *connectionImpl) newClient(ctx context.Context) error {
 			Msg:  "ProjectID is empty",
 		}
 	}
+
+	// Resolve credentials options before acquiring the lock so that
+	// validation errors are returned without holding the mutex.
 	switch c.authType {
 	case OptionValueAuthTypeJSONCredentialFile, OptionValueAuthTypeJSONCredentialString, OptionValueAuthTypeUserAuthentication:
 		var credentials option.ClientOption
@@ -531,6 +543,9 @@ func (c *connectionImpl) newClient(ctx context.Context) error {
 			credentials = option.WithTokenSource(c)
 		}
 
+		newClientMu.Lock()
+		defer newClientMu.Unlock()
+
 		client, err := bigquery.NewClient(ctx, c.catalog, credentials)
 		if err != nil {
 			return err
@@ -543,6 +558,12 @@ func (c *connectionImpl) newClient(ctx context.Context) error {
 
 		c.client = client
 	default:
+		// Application Default Credentials path: both bigquery.NewClient and
+		// EnableStorageReadClient trigger ADC discovery and gRPC global init,
+		// which are not safe to call concurrently from multiple OS threads.
+		newClientMu.Lock()
+		defer newClientMu.Unlock()
+
 		client, err := bigquery.NewClient(ctx, c.catalog)
 		if err != nil {
 			return err
