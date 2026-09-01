@@ -207,9 +207,34 @@ pub fn set_option_connection(
     check_status(status, error)
 }
 
+/// Sets one option on a statement.
 pub fn set_option_statement(
     driver: &FFI_AdbcDriver,
     statement: &mut FFI_AdbcStatement,
+    version: AdbcVersion,
+    key: impl AsRef<str>,
+    value: OptionValue,
+) -> Result<()> {
+    // SAFETY: an exclusive borrow proves the statement is initialized, alive for
+    // the call, and not aliased by any other statement function.
+    unsafe { set_option_statement_raw(driver, statement, version, key, value) }
+}
+
+/// Sets one option on a statement addressed by raw pointer.
+///
+/// For callers that must not hold a `&mut` to the statement: a caller may have
+/// `AdbcStatementCancel` in flight on another thread, which the ADBC
+/// specification allows, and a `&mut` would make that concurrent access an
+/// aliasing violation.
+///
+/// # Safety
+///
+/// `statement` must point to an initialized, not-yet-released statement that
+/// stays alive for the call, and the caller must serialize this call against
+/// every other statement function except `AdbcStatementCancel`.
+pub unsafe fn set_option_statement_raw(
+    driver: &FFI_AdbcDriver,
+    statement: *mut FFI_AdbcStatement,
     version: AdbcVersion,
     key: impl AsRef<str>,
     value: OptionValue,
