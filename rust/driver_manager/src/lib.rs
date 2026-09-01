@@ -36,9 +36,18 @@
 //! ## Using across threads
 //!
 //! [ManagedDriver], [ManagedDatabase], [ManagedConnection] and [ManagedStatement]
-//! can be used across threads though all of their operations are serialized
-//! under the hood. They hold their inner implementations within [std::sync::Arc],
-//! so they are cheaply clonable.
+//! can be used across threads. Their operations are serialized under the hood,
+//! with one deliberate exception: [Statement::cancel] is issued without that
+//! serialization, because the ADBC specification defines
+//! `AdbcStatementCancel` as callable while another statement function is
+//! running, and serializing it would make it wait for the call it exists to
+//! interrupt. A driver is required to accept it there; one that is not
+//! thread-safe in that respect must not be used through this crate.
+//!
+//! They hold their inner implementations within [std::sync::Arc], so they are
+//! cheaply clonable. Clones of a [ManagedStatement] are handles to one
+//! statement, not separate statements, and the statement is released when the
+//! last of them is dropped.
 //!
 //! ## Example
 //!
@@ -104,6 +113,7 @@ pub mod error;
 pub mod profile;
 pub mod search;
 
+use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::ffi::{CString, OsStr};
 use std::ops::DerefMut;
@@ -115,7 +125,7 @@ use std::sync::{Arc, Mutex};
 
 use adbc_ffi::options::{
     check_status, get_option_bytes, get_option_string, set_option_connection, set_option_database,
-    set_option_statement,
+    set_option_statement_raw,
 };
 use arrow_array::ffi::{to_ffi, FFI_ArrowSchema};
 use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
@@ -870,7 +880,8 @@ impl Connection for ManagedConnection {
         check_status(status, error)?;
 
         let inner = Arc::new(ManagedStatementInner {
-            statement: Mutex::new(statement),
+            statement: UnsafeCell::new(statement),
+            lock: Mutex::new(()),
             connection: self.inner.clone(),
         });
 
@@ -1133,9 +1144,47 @@ impl Connection for ManagedConnection {
     }
 }
 
+/// The FFI statement, and the lock that serializes the calls needing it.
+///
+/// Every statement function except [`AdbcStatementCancel`] requires external
+/// synchronization, so each takes `lock`. `AdbcStatementCancel` is specified to
+/// be callable *while another statement function is running* — that is the only
+/// thing it is for — so it must not take `lock`, or it would be serialized
+/// behind the very call it exists to interrupt, and a driver blocked inside
+/// `AdbcStatementExecuteQuery` could never be cancelled.
+///
+/// Both paths reach the statement through the same raw pointer. The `UnsafeCell`
+/// lives in the `Arc` allocation, so its address is fixed for the lifetime of
+/// the statement, and the driver defines the thread-safety of what it points at.
+///
+/// [`AdbcStatementCancel`]: https://arrow.apache.org/adbc/current/format/specification.html
 struct ManagedStatementInner {
-    statement: Mutex<adbc_ffi::FFI_AdbcStatement>,
+    statement: UnsafeCell<adbc_ffi::FFI_AdbcStatement>,
+    lock: Mutex<()>,
     connection: Arc<ManagedConnectionInner>,
+}
+
+// SAFETY: the statement is only ever reached through `statement_ptr`, and every
+// call made through it is one whose thread-safety the ADBC specification
+// defines: all but `AdbcStatementCancel` under `lock`, and `AdbcStatementCancel`
+// concurrently, as the specification allows.
+unsafe impl Send for ManagedStatementInner {}
+unsafe impl Sync for ManagedStatementInner {}
+
+impl ManagedStatementInner {
+    fn statement_ptr(&self) -> *mut adbc_ffi::FFI_AdbcStatement {
+        self.statement.get()
+    }
+}
+
+impl Drop for ManagedStatementInner {
+    fn drop(&mut self) {
+        let driver = &self.connection.database.driver.driver;
+        let method = driver_method!(driver, StatementRelease);
+        // TODO(alexandreyc): how should we handle `StatementRelease` failing?
+        // See: https://github.com/apache/arrow-adbc/pull/1742#discussion_r1574388409
+        unsafe { method(self.statement_ptr(), null_mut()) };
+    }
 }
 /// Implementation of [Statement].
 #[derive(Clone)]
@@ -1156,23 +1205,30 @@ impl ManagedStatement {
 impl Statement for ManagedStatement {
     fn bind(&mut self, batch: RecordBatch) -> Result<()> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementBind);
         let batch: StructArray = batch.into();
         let (mut array, mut schema) = to_ffi(&batch.to_data())?;
-        let status = unsafe { method(statement.deref_mut(), &mut array, &mut schema, &mut error) };
+        let status = unsafe {
+            method(
+                self.inner.statement_ptr(),
+                &mut array,
+                &mut schema,
+                &mut error,
+            )
+        };
         check_status(status, error)?;
         Ok(())
     }
 
     fn bind_stream(&mut self, reader: Box<dyn RecordBatchReader + Send>) -> Result<()> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementBindStream);
         let mut stream = FFI_ArrowArrayStream::new(reader);
-        let status = unsafe { method(statement.deref_mut(), &mut stream, &mut error) };
+        let status = unsafe { method(self.inner.statement_ptr(), &mut stream, &mut error) };
         check_status(status, error)?;
         Ok(())
     }
@@ -1185,20 +1241,28 @@ impl Statement for ManagedStatement {
             ));
         }
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementCancel);
-        let status = unsafe { method(statement.deref_mut(), &mut error) };
+        // Deliberately not under `ManagedStatementInner::lock`: a cancel that
+        // waits for the running statement call is no cancel at all.
+        let status = unsafe { method(self.inner.statement_ptr(), &mut error) };
         check_status(status, error)
     }
 
     fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementExecuteQuery);
         let mut stream = FFI_ArrowArrayStream::empty();
-        let status = unsafe { method(statement.deref_mut(), &mut stream, null_mut(), &mut error) };
+        let status = unsafe {
+            method(
+                self.inner.statement_ptr(),
+                &mut stream,
+                null_mut(),
+                &mut error,
+            )
+        };
         check_status(status, error)?;
         let reader = ArrowArrayStreamReader::try_new(stream)?;
         Ok(Box::new(reader))
@@ -1206,24 +1270,24 @@ impl Statement for ManagedStatement {
 
     fn execute_schema(&mut self) -> Result<arrow_schema::Schema> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementExecuteSchema);
         let mut schema = FFI_ArrowSchema::empty();
-        let status = unsafe { method(statement.deref_mut(), &mut schema, &mut error) };
+        let status = unsafe { method(self.inner.statement_ptr(), &mut schema, &mut error) };
         check_status(status, error)?;
         Ok((&schema).try_into()?)
     }
 
     fn execute_update(&mut self) -> Result<Option<i64>> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementExecuteQuery);
         let mut rows_affected: i64 = -1;
         let status = unsafe {
             method(
-                statement.deref_mut(),
+                self.inner.statement_ptr(),
                 null_mut(),
                 &mut rows_affected,
                 &mut error,
@@ -1235,7 +1299,7 @@ impl Statement for ManagedStatement {
 
     fn execute_partitions(&mut self) -> Result<PartitionedResult> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementExecutePartitions);
         let mut schema = FFI_ArrowSchema::empty();
@@ -1243,7 +1307,7 @@ impl Statement for ManagedStatement {
         let mut rows_affected: i64 = -1;
         let status = unsafe {
             method(
-                statement.deref_mut(),
+                self.inner.statement_ptr(),
                 &mut schema,
                 &mut partitions,
                 &mut rows_affected,
@@ -1263,21 +1327,21 @@ impl Statement for ManagedStatement {
 
     fn get_parameter_schema(&self) -> Result<arrow_schema::Schema> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementGetParameterSchema);
         let mut schema = FFI_ArrowSchema::empty();
-        let status = unsafe { method(statement.deref_mut(), &mut schema, &mut error) };
+        let status = unsafe { method(self.inner.statement_ptr(), &mut schema, &mut error) };
         check_status(status, error)?;
         Ok((&schema).try_into()?)
     }
 
     fn prepare(&mut self) -> Result<()> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementPrepare);
-        let status = unsafe { method(statement.deref_mut(), &mut error) };
+        let status = unsafe { method(self.inner.statement_ptr(), &mut error) };
         check_status(status, error)?;
         Ok(())
     }
@@ -1285,22 +1349,28 @@ impl Statement for ManagedStatement {
     fn set_sql_query(&mut self, query: impl AsRef<str>) -> Result<()> {
         let query = CString::new(query.as_ref())?;
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementSetSqlQuery);
-        let status = unsafe { method(statement.deref_mut(), query.as_ptr(), &mut error) };
+        let status = unsafe { method(self.inner.statement_ptr(), query.as_ptr(), &mut error) };
         check_status(status, error)?;
         Ok(())
     }
 
     fn set_substrait_plan(&mut self, plan: impl AsRef<[u8]>) -> Result<()> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementSetSubstraitPlan);
         let plan = plan.as_ref();
-        let status =
-            unsafe { method(statement.deref_mut(), plan.as_ptr(), plan.len(), &mut error) };
+        let status = unsafe {
+            method(
+                self.inner.statement_ptr(),
+                plan.as_ptr(),
+                plan.len(),
+                &mut error,
+            )
+        };
         check_status(status, error)?;
         Ok(())
     }
@@ -1311,13 +1381,13 @@ impl Optionable for ManagedStatement {
 
     fn get_option_bytes(&self, key: Self::Option) -> Result<Vec<u8>> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let method = driver_method!(driver, StatementGetOptionBytes);
         let populate = |key: *const c_char,
                         value: *mut u8,
                         length: *mut usize,
                         error: *mut adbc_ffi::FFI_AdbcError| unsafe {
-            method(statement.deref_mut(), key, value, length, error)
+            method(self.inner.statement_ptr(), key, value, length, error)
         };
         get_option_bytes(key, populate, driver)
     }
@@ -1326,10 +1396,17 @@ impl Optionable for ManagedStatement {
         let key = CString::new(key.as_ref())?;
         let mut value: f64 = f64::default();
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementGetOptionDouble);
-        let status = unsafe { method(statement.deref_mut(), key.as_ptr(), &mut value, &mut error) };
+        let status = unsafe {
+            method(
+                self.inner.statement_ptr(),
+                key.as_ptr(),
+                &mut value,
+                &mut error,
+            )
+        };
         check_status(status, error)?;
         Ok(value)
     }
@@ -1338,47 +1415,48 @@ impl Optionable for ManagedStatement {
         let key = CString::new(key.as_ref())?;
         let mut value: i64 = 0;
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let mut error = adbc_ffi::FFI_AdbcError::with_driver(driver);
         let method = driver_method!(driver, StatementGetOptionInt);
-        let status = unsafe { method(statement.deref_mut(), key.as_ptr(), &mut value, &mut error) };
+        let status = unsafe {
+            method(
+                self.inner.statement_ptr(),
+                key.as_ptr(),
+                &mut value,
+                &mut error,
+            )
+        };
         check_status(status, error)?;
         Ok(value)
     }
 
     fn get_option_string(&self, key: Self::Option) -> Result<String> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
+        let _guard = self.inner.lock.lock().unwrap();
         let method = driver_method!(driver, StatementGetOption);
         let populate = |key: *const c_char,
                         value: *mut c_char,
                         length: *mut usize,
                         error: *mut adbc_ffi::FFI_AdbcError| unsafe {
-            method(statement.deref_mut(), key, value, length, error)
+            method(self.inner.statement_ptr(), key, value, length, error)
         };
         get_option_string(key, populate, driver)
     }
 
     fn set_option(&mut self, key: Self::Option, value: OptionValue) -> Result<()> {
         let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
-        set_option_statement(
-            driver,
-            statement.deref_mut(),
-            self.driver_version(),
-            key,
-            value,
-        )
-    }
-}
-
-impl Drop for ManagedStatement {
-    fn drop(&mut self) {
-        let driver = self.ffi_driver();
-        let mut statement = self.inner.statement.lock().unwrap();
-        let method = driver_method!(driver, StatementRelease);
-        // TODO(alexandreyc): how should we handle `StatementRelease` failing?
-        // See: https://github.com/apache/arrow-adbc/pull/1742#discussion_r1574388409
-        unsafe { method(statement.deref_mut(), null_mut()) };
+        let _guard = self.inner.lock.lock().unwrap();
+        // SAFETY: the statement is live for the call, and `lock` excludes every
+        // other statement function; `AdbcStatementCancel` is the one call the
+        // specification allows to run concurrently with this.
+        unsafe {
+            set_option_statement_raw(
+                driver,
+                self.inner.statement_ptr(),
+                self.driver_version(),
+                key,
+                value,
+            )
+        }
     }
 }
