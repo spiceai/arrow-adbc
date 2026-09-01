@@ -215,8 +215,12 @@ pub fn set_option_statement(
     key: impl AsRef<str>,
     value: OptionValue,
 ) -> Result<()> {
-    // SAFETY: an exclusive borrow proves the statement is initialized, alive for
-    // the call, and not aliased by any other statement function.
+    // SAFETY: the exclusive borrow proves the statement is alive for the call and
+    // not aliased by another statement function, which is what the raw form
+    // cannot check. It does not prove `private_data` refers to an initialized,
+    // unreleased statement — no signature here can, since the type is
+    // constructible with `Default` — and that obligation is the caller's, as it
+    // already is for every other driver call in this crate.
     unsafe { set_option_statement_raw(driver, statement, version, key, value) }
 }
 
@@ -231,7 +235,8 @@ pub fn set_option_statement(
 ///
 /// `statement` must point to an initialized, not-yet-released statement that
 /// stays alive for the call, and the caller must serialize this call against
-/// every other statement function except `AdbcStatementCancel`.
+/// every other statement function except `AdbcStatementCancel`, which the ADBC
+/// specification permits to run concurrently.
 pub unsafe fn set_option_statement_raw(
     driver: &FFI_AdbcDriver,
     statement: *mut FFI_AdbcStatement,

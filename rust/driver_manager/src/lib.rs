@@ -36,9 +36,18 @@
 //! ## Using across threads
 //!
 //! [ManagedDriver], [ManagedDatabase], [ManagedConnection] and [ManagedStatement]
-//! can be used across threads though all of their operations are serialized
-//! under the hood. They hold their inner implementations within [std::sync::Arc],
-//! so they are cheaply clonable.
+//! can be used across threads. Their operations are serialized under the hood,
+//! with one deliberate exception: [Statement::cancel] is issued without that
+//! serialization, because the ADBC specification defines
+//! `AdbcStatementCancel` as callable while another statement function is
+//! running, and serializing it would make it wait for the call it exists to
+//! interrupt. A driver is required to accept it there; one that is not
+//! thread-safe in that respect must not be used through this crate.
+//!
+//! They hold their inner implementations within [std::sync::Arc], so they are
+//! cheaply clonable. Clones of a [ManagedStatement] are handles to one
+//! statement, not separate statements, and the statement is released when the
+//! last of them is dropped.
 //!
 //! ## Example
 //!
