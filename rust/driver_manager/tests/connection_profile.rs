@@ -84,6 +84,7 @@ bool_opt = true
     .to_string()
 }
 
+#[allow(dead_code)]
 fn profile_without_driver() -> String {
     r#"
 profile_version = 1
