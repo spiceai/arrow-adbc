@@ -15,6 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Shared by several test binaries, each of which uses only part of it.
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
