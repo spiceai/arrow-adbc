@@ -19,6 +19,8 @@ name: C#
 
 on:
   push:
+    branches-ignore:
+      - 'dependabot/**'
     paths:
       - '.github/workflows/csharp.yml'
       - 'ci/scripts/csharp_*'
@@ -50,21 +52,78 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dotnet: ['8.0.x']
+        dotnet: ['8.0.x', '10.0.x']
         os: [ubuntu-latest, windows-2022, macos-15-intel, macos-latest]
     steps:
       - name: Install C#
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: ${{ matrix.dotnet }}
       - name: Checkout ADBC
-        uses: actions/checkout@v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           submodules: recursive
+          persist-credentials: false
       - name: Build
         shell: bash
         run: ci/scripts/csharp_build.sh $(pwd)
       - name: Test
         shell: bash
         run: ci/scripts/csharp_test.sh $(pwd)
+
+  # Publishes the AOT test fixture driver as a NativeAOT shared library (net10)
+  # and exercises it through the managed CAdbcDriverImporter. This catches
+  # AOT regressions (trim-unsafe reflection, missing exports, broken C-ABI
+  # marshaling) on both the import and export halves of csharp/src/Apache.Arrow.Adbc/C.
+  csharp-aot:
+    name: "C# NativeAOT fixture interop (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    if: ${{ !contains(github.event.pull_request.title, 'WIP') }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            rid: win-x64
+            lib-name: Apache.Arrow.Adbc.TestFixture.Native.dll
+          - os: ubuntu-latest
+            rid: linux-x64
+            lib-name: Apache.Arrow.Adbc.TestFixture.Native.so
+          - os: macos-latest
+            rid: osx-arm64
+            lib-name: Apache.Arrow.Adbc.TestFixture.Native.dylib
+    steps:
+      - name: Checkout ADBC
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          # NativeAOT requires net10. Using 10.0.x selects the latest
+          # available SDK; preview tags may be needed until GA.
+          dotnet-version: '10.0.x'
+      - name: Setup MSVC (for NativeAOT linker)
+        if: runner.os == 'Windows'
+        # Third-party action; activates vcvars64 so ilc's downstream
+        # link.exe step can find link.exe/lib.exe and the Windows SDK.
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+      - name: Publish AOT test fixture
+        shell: bash
+        run: |
+          dotnet publish \
+            csharp/test/AotInterop/Apache.Arrow.Adbc.TestFixture.Native/Apache.Arrow.Adbc.TestFixture.Native.csproj \
+            -c Release -r ${{ matrix.rid }} \
+            -o csharp/artifacts/aot-fixture
+      - name: Run AOT interop tests
+        shell: bash
+        env:
+          ADBC_TEST_AOT_FIXTURE_PATH: ${{ github.workspace }}/csharp/artifacts/aot-fixture/${{ matrix.lib-name }}
+        run: |
+          dotnet test \
+            csharp/test/AotInterop/Apache.Arrow.Adbc.TestFixture.Tests/Apache.Arrow.Adbc.TestFixture.Tests.csproj \
+            -c Release

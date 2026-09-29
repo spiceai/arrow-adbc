@@ -168,7 +168,7 @@ test_apt() {
   if [ "${TEST_STAGING:-0}" -gt 0 ]; then
     verify_type=staging-${verify_type}
   fi
-  for target in "debian:bookworm" \
+  for target in "debian:trixie" \
                 "ubuntu:jammy"; do \
     show_info "Verifying ${target}..."
     if ! docker run \
@@ -249,7 +249,7 @@ install_dotnet() {
   if command -v dotnet; then
     show_info "Found $(dotnet --version) at $(which dotnet)"
 
-    if dotnet --version | grep --quiet --fixed-string 8.0; then
+    if dotnet --version | grep --quiet --fixed-string 10.0; then
         local csharp_bin=$(dirname $(which dotnet))
         show_info "Found C# at $(which csharp) (.NET $(dotnet --version))"
         DOTNET_ALREADY_INSTALLED=1
@@ -260,30 +260,11 @@ install_dotnet() {
   show_info "dotnet found but it is the wrong version or dotnet not found"
 
   local csharp_bin=${ARROW_TMPDIR}/csharp/bin
-  local dotnet_version=8.0.204
-  local dotnet_platform=
-  case "$(uname)" in
-      Linux)
-          dotnet_platform=linux
-          ;;
-      Darwin)
-          dotnet_platform=macos
-          ;;
-  esac
-  local dotnet_download_thank_you_url=https://dotnet.microsoft.com/download/thank-you/dotnet-sdk-${dotnet_version}-${dotnet_platform}-x64-binaries
-  show_info "Getting .NET download URL from ${dotnet_download_thank_you_url}"
-  curl --fail -L -o "${ARROW_TMPDIR}/dotnetdownload.html" "${dotnet_download_thank_you_url}"
-  local dotnet_download_url=$(grep 'directLink' "${ARROW_TMPDIR}/dotnetdownload.html" | \
-                                  grep -E -o 'https://builds.dotnet[^"]+' | \
-                                  head -n1)
-  if [ -z "${dotnet_download_url}" ]; then
-    echo "Failed to get .NET download URL from ${dotnet_download_thank_you_url}"
-    exit 1
-  fi
-  show_info "Downloading .NET from ${dotnet_download_url}"
+  local dotnet_channel=10.0
   mkdir -p ${csharp_bin}
-  curl -sL ${dotnet_download_url} | \
-      tar xzf - -C ${csharp_bin}
+  show_info "Installing .NET ${dotnet_channel} via dotnet-install.sh"
+  curl --fail -sSL https://dot.net/v1/dotnet-install.sh | \
+      bash /dev/stdin --channel ${dotnet_channel} --install-dir ${csharp_bin}
   PATH=${csharp_bin}:${PATH}
   show_info "Installed C# at $(which csharp) (.NET $(dotnet --version))"
 
@@ -530,6 +511,7 @@ test_cpp() {
     export CMAKE_PREFIX_PATH="${CONDA_BACKUP_CMAKE_PREFIX_PATH}:${CMAKE_PREFIX_PATH}"
     # The CMake setup forces RPATH to be the Conda prefix
     export CPP_INSTALL_PREFIX="${CONDA_PREFIX}"
+    export CONDA_BUILD=1
   else
     export CPP_INSTALL_PREFIX="${ARROW_TMPDIR}/local"
   fi
@@ -545,12 +527,9 @@ test_cpp() {
   export BUILD_DRIVER_FLIGHTSQL=0
   # PostgreSQL driver requires running database for testing
   export BUILD_DRIVER_POSTGRESQL=0
-  # Snowflake driver requires snowflake creds for testing
-  export BUILD_DRIVER_SNOWFLAKE=0
   "${ADBC_DIR}/ci/scripts/cpp_test.sh" "${ARROW_TMPDIR}/cpp-build" "${CPP_INSTALL_PREFIX}"
   export BUILD_DRIVER_FLIGHTSQL=1
   export BUILD_DRIVER_POSTGRESQL=1
-  export BUILD_DRIVER_SNOWFLAKE=1
 }
 
 test_java() {
@@ -568,8 +547,7 @@ test_python() {
 
   # Build and test Python
   maybe_setup_virtualenv cython duckdb pandas polars protobuf pyarrow pytest setuptools_scm setuptools importlib_resources || exit 1
-  # XXX: pin Python for now since various other packages haven't caught up
-  maybe_setup_conda --file "${ADBC_DIR}/ci/conda_env_python.txt" python=3.12 || exit 1
+  maybe_setup_conda --file "${ADBC_DIR}/ci/conda_env_python.txt" || exit 1
 
   if [ "${USE_CONDA}" -gt 0 ]; then
     CMAKE_PREFIX_PATH="${CONDA_BACKUP_CMAKE_PREFIX_PATH}:${CMAKE_PREFIX_PATH}"
@@ -599,22 +577,18 @@ test_r() {
   R CMD INSTALL "${ADBC_SOURCE_DIR}/r/adbcdrivermanager" --preclean --library="${ARROW_TMPDIR}/r/tmplib"
   R CMD INSTALL "${ADBC_SOURCE_DIR}/r/adbcsqlite" --preclean --library="${ARROW_TMPDIR}/r/tmplib"
   R CMD INSTALL "${ADBC_SOURCE_DIR}/r/adbcpostgresql" --preclean --library="${ARROW_TMPDIR}/r/tmplib"
-  R CMD INSTALL "${ADBC_SOURCE_DIR}/r/adbcsnowflake" --preclean --library="${ARROW_TMPDIR}/r/tmplib"
 
   pushd "${ARROW_TMPDIR}/r"
   R CMD build "${ADBC_SOURCE_DIR}/r/adbcdrivermanager"
   R CMD build "${ADBC_SOURCE_DIR}/r/adbcsqlite"
   R CMD build "${ADBC_SOURCE_DIR}/r/adbcpostgresql"
-  R CMD build "${ADBC_SOURCE_DIR}/r/adbcsnowflake"
   local -r adbcdrivermanager_tar_gz="$(ls adbcdrivermanager_*.tar.gz)"
   local -r adbcsqlite_tar_gz="$(ls adbcsqlite_*.tar.gz)"
   local -r adbcpostgresql_tar_gz="$(ls adbcpostgresql_*.tar.gz)"
-  local -r adbcsnowflake_tar_gz="$(ls adbcsnowflake_*.tar.gz)"
 
   R_LIBS_USER="${ARROW_TMPDIR}/r/tmplib" R CMD check "${adbcdrivermanager_tar_gz}" --no-manual
   R_LIBS_USER="${ARROW_TMPDIR}/r/tmplib" R CMD check "${adbcsqlite_tar_gz}" --no-manual
   R_LIBS_USER="${ARROW_TMPDIR}/r/tmplib" R CMD check "${adbcpostgresql_tar_gz}" --no-manual
-  R_LIBS_USER="${ARROW_TMPDIR}/r/tmplib" R CMD check "${adbcsnowflake_tar_gz}" --no-manual
   popd
 }
 
@@ -702,7 +676,6 @@ test_rust() {
   maybe_setup_conda rust || exit 1
 
   # We expect the C++ libraries to exist.
-  export ADBC_SNOWFLAKE_GO_LIB_DIR="${CPP_INSTALL_PREFIX}/lib"
   # XXX(https://github.com/apache/arrow-adbc/issues/3288)
   if [[ -n "${CC}" ]]; then
       export RUSTDOCFLAGS="-Clinker=${CC}"

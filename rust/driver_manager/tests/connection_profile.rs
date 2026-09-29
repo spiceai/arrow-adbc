@@ -18,11 +18,11 @@
 use std::path::PathBuf;
 
 use adbc_core::options::{AdbcVersion, OptionDatabase, OptionValue};
-use adbc_core::{error::Status, LOAD_FLAG_DEFAULT};
+use adbc_core::{LOAD_FLAG_DEFAULT, error::Status};
+use adbc_driver_manager::ManagedDatabase;
 use adbc_driver_manager::profile::{
     ConnectionProfile, ConnectionProfileProvider, FilesystemProfileProvider,
 };
-use adbc_driver_manager::ManagedDatabase;
 use serial_test::serial;
 use std::env;
 
@@ -320,9 +320,9 @@ driver = "foo"
     for (name, profile_content, expected_status, expected_msg_fragment) in test_cases {
         let (tmp_dir, profile_path) = write_profile_to_tempfile(name, &profile_content);
 
-        let provider = FilesystemProfileProvider::new_with_search_paths(Some(vec![tmp_dir
-            .path()
-            .to_path_buf()]));
+        let provider = FilesystemProfileProvider::new_with_search_paths(Some(vec![
+            tmp_dir.path().to_path_buf(),
+        ]));
         let result = provider.get_profile(profile_path.to_str().unwrap());
 
         assert!(result.is_err(), "Test case '{}': expected error", name);
@@ -469,8 +469,8 @@ fn test_profile_display() {
         .expect("Failed to close/remove temporary directory");
 }
 
-#[test]
 #[serial]
+#[test]
 fn test_profile_hierarchical_path_via_env_var() {
     use std::env;
 
@@ -527,8 +527,8 @@ fn test_profile_hierarchical_path_via_env_var() {
         .expect("Failed to close/remove temporary directory");
 }
 
-#[test]
 #[serial]
+#[test]
 fn test_profile_hierarchical_path_with_extension_via_env_var() {
     let tmp_dir = tempfile::Builder::new()
         .prefix("adbc_profile_env_test2")
@@ -692,9 +692,9 @@ uri = ":memory:"
     let profile_path = manifest_dir.path().join("sqliteprof.toml");
     std::fs::write(&profile_path, profile_contents).unwrap();
 
-    let provider = FilesystemProfileProvider::new_with_search_paths(Some(vec![profile_dir
-        .path()
-        .to_path_buf()]));
+    let provider = FilesystemProfileProvider::new_with_search_paths(Some(vec![
+        profile_dir.path().to_path_buf(),
+    ]));
     let database = ManagedDatabase::from_uri_with_profile_provider(
         "profile://sqlitedev",
         None,

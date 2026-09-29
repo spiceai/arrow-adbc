@@ -35,13 +35,35 @@ using adbc_validation::IsOkStatus;
 
 namespace adbcpq {
 
+// COPY (SELECT CAST(col AS NUMERIC(18, 6)) AS col FROM (VALUES
+// ('5000000000.000001'), ('4999999999.000001'), ('10000.000001'),
+// ('9999.000001'), ('10001.000001'), ('100000000.000001'),
+// ('-10000.000001')) AS drvd(col))
+// TO STDOUT WITH (FORMAT binary);
+static uint8_t kTestPgCopyNumericZeroIntegerGroups[] = {
+    0x50, 0x47, 0x43, 0x4f, 0x50, 0x59, 0x0a, 0xff, 0x0d, 0x0a, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0x00, 0x05, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0x06, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x64, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0x00, 0x05, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x06, 0x00, 0x31, 0x27, 0x0f, 0x27, 0x0f, 0x00, 0x00, 0x00, 0x64, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x10, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x03, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x06, 0x27, 0x0f, 0x00, 0x00, 0x00, 0x64, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x10, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x64, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0x00, 0x05, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x64, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x04, 0x00, 0x01, 0x40, 0x00, 0x00,
+    0x06, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0xff, 0xff};
+
 class PostgresCopyStreamWriteTester {
  public:
   ArrowErrorCode Init(struct ArrowSchema* schema, struct ArrowArray* array,
                       const PostgresTypeResolver& type_resolver,
                       struct ArrowError* error = nullptr) {
     NANOARROW_RETURN_NOT_OK(writer_.Init(schema));
-    NANOARROW_RETURN_NOT_OK(writer_.InitFieldWriters(type_resolver, error));
+    NANOARROW_RETURN_NOT_OK(writer_.InitFieldWriters(type_resolver, nullptr,
+                                                     /*disable_decimal_fast_path=*/false,
+                                                     error));
     NANOARROW_RETURN_NOT_OK(writer_.SetArray(array));
     return NANOARROW_OK;
   }
@@ -109,6 +131,54 @@ class PostgresCopyTest : public ::testing::Test {
   struct AdbcDatabase database_ = {};
   std::shared_ptr<PostgresTypeResolver> type_resolver_;
 };
+
+template <enum ArrowType Type>
+static void AssertNumericZeroIntegerGroupsRoundTrip(
+    const PostgresTypeResolver& type_resolver) {
+  adbc_validation::Handle<struct ArrowSchema> schema;
+  adbc_validation::Handle<struct ArrowArray> array;
+  struct ArrowError na_error;
+  constexpr int32_t size = (Type == NANOARROW_TYPE_DECIMAL128) ? 128 : 256;
+  constexpr int32_t precision = 18;
+  constexpr int32_t scale = 6;
+
+  struct ArrowDecimal decimals[7];
+  constexpr struct ArrowStringView digits[] = {
+      {"5000000000000001", 16}, {"4999999999000001", 16}, {"10000000001", 11},
+      {"9999000001", 10},       {"10001000001", 11},      {"100000000000001", 15},
+      {"-10000000001", 12}};
+
+  std::vector<std::optional<ArrowDecimal*>> values;
+  values.reserve(7);
+  for (size_t i = 0; i < 7; i++) {
+    ArrowDecimalInit(&decimals[i], size, precision, scale);
+    ASSERT_EQ(ArrowDecimalSetDigits(&decimals[i], digits[i]), 0);
+    values.push_back(&decimals[i]);
+  }
+
+  ArrowSchemaInit(&schema.value);
+  ASSERT_EQ(ArrowSchemaSetTypeStruct(&schema.value, 1), 0);
+  ASSERT_EQ(ArrowSchemaSetTypeDecimal(schema.value.children[0], Type, precision, scale),
+            0);
+  ASSERT_EQ(ArrowSchemaSetName(schema.value.children[0], "col"), 0);
+  ASSERT_EQ(adbc_validation::MakeBatch<ArrowDecimal*>(&schema.value, &array.value,
+                                                      &na_error, values),
+            ADBC_STATUS_OK);
+
+  PostgresCopyStreamWriteTester tester;
+  ASSERT_EQ(tester.Init(&schema.value, &array.value, type_resolver), NANOARROW_OK);
+  ASSERT_EQ(tester.WriteAll(nullptr), ENODATA);
+
+  const struct ArrowBuffer buf = tester.WriteBuffer();
+  // The last 2 bytes of a message can be transmitted via PQputCopyData
+  // so no need to test those bytes from the Writer
+  constexpr size_t buf_size = sizeof(kTestPgCopyNumericZeroIntegerGroups) - 2;
+  ASSERT_EQ(buf.size_bytes, static_cast<int64_t>(buf_size));
+  for (size_t i = 0; i < buf_size; i++) {
+    ASSERT_EQ(buf.data[i], kTestPgCopyNumericZeroIntegerGroups[i])
+        << " at position " << i;
+  }
+}
 
 TEST_F(PostgresCopyTest, PostgresCopyWriteBoolean) {
   adbc_validation::Handle<struct ArrowSchema> schema;
@@ -1054,6 +1124,14 @@ TEST_F(PostgresCopyTest, PostgresCopyWriteNumericNegativeScale) {
   }
 }
 
+TEST_F(PostgresCopyTest, PostgresCopyWriteNumericPreservesZeroIntegerGroupsDecimal128) {
+  AssertNumericZeroIntegerGroupsRoundTrip<NANOARROW_TYPE_DECIMAL128>(*type_resolver_);
+}
+
+TEST_F(PostgresCopyTest, PostgresCopyWriteNumericPreservesZeroIntegerGroupsDecimal256) {
+  AssertNumericZeroIntegerGroupsRoundTrip<NANOARROW_TYPE_DECIMAL256>(*type_resolver_);
+}
+
 using TimestampTestParamType =
     std::tuple<enum ArrowTimeUnit, const char*, std::vector<std::optional<int64_t>>>;
 
@@ -1584,6 +1662,120 @@ TEST_F(PostgresCopyTest, PostgresCopyWriteFixedSizeListInteger) {
   for (size_t i = 0; i < buf_size; i++) {
     ASSERT_EQ(buf.data[i], kTestPgCopyFixedSizeIntegerArray[i])
         << "failure at index " << i;
+  }
+}
+
+// Regression test for https://github.com/apache/arrow-adbc/issues/4319.
+// When the source array has offset > 0 (a sliced parent), the list writer
+// must read child offsets at (array_view->offset + index), not at index.
+// Writing rows 3..5 of a 6-row source via offset/length must produce the
+// same body as writing those rows as a fresh 3-row array.
+TEST_P(PostgresCopyListTest, PostgresCopyWriteListSlicedMatchesDirect) {
+  adbc_validation::Handle<struct ArrowSchema> schema;
+  adbc_validation::Handle<struct ArrowArray> source;
+  adbc_validation::Handle<struct ArrowArray> tail;
+  struct ArrowError na_error;
+
+  ASSERT_EQ(adbc_validation::MakeSchema(
+                &schema.value, {adbc_validation::SchemaField::Nested(
+                                   "col", GetParam(), {{"item", NANOARROW_TYPE_INT32}})}),
+            ADBC_STATUS_OK);
+
+  ASSERT_EQ(
+      adbc_validation::MakeBatch<std::vector<int32_t>>(
+          &schema.value, &source.value, &na_error,
+          {std::vector<int32_t>{1, 2}, std::vector<int32_t>{3, 4, 5}, std::nullopt,
+           std::vector<int32_t>{6}, std::vector<int32_t>{7, 8}, std::vector<int32_t>{9}}),
+      ADBC_STATUS_OK);
+
+  ASSERT_EQ(
+      adbc_validation::MakeBatch<std::vector<int32_t>>(
+          &schema.value, &tail.value, &na_error,
+          {std::vector<int32_t>{6}, std::vector<int32_t>{7, 8}, std::vector<int32_t>{9}}),
+      ADBC_STATUS_OK);
+
+  PostgresCopyStreamWriteTester ref_tester;
+  ASSERT_EQ(ref_tester.Init(&schema.value, &tail.value, *type_resolver_), NANOARROW_OK);
+  ASSERT_EQ(ref_tester.WriteAll(nullptr), ENODATA);
+  const struct ArrowBuffer ref_buf = ref_tester.WriteBuffer();
+
+  // Slice: hide the first 3 rows by setting offset/length on the struct
+  // root and on the list-typed column.
+  source->offset = 0;
+  source->length = 3;
+  source->children[0]->offset = 3;
+  source->children[0]->length = 3;
+
+  PostgresCopyStreamWriteTester sliced_tester;
+  ASSERT_EQ(sliced_tester.Init(&schema.value, &source.value, *type_resolver_),
+            NANOARROW_OK);
+  ASSERT_EQ(sliced_tester.WriteAll(nullptr), ENODATA);
+  const struct ArrowBuffer sliced_buf = sliced_tester.WriteBuffer();
+
+  ASSERT_EQ(sliced_buf.size_bytes, ref_buf.size_bytes);
+  for (int64_t i = 0; i < sliced_buf.size_bytes; i++) {
+    ASSERT_EQ(sliced_buf.data[i], ref_buf.data[i]) << "failure at index " << i;
+  }
+}
+
+// Same regression check for FIXED_SIZE_LIST, which takes the
+// IsFixedSize=true branch in PostgresCopyListFieldWriter.
+TEST_F(PostgresCopyTest, PostgresCopyWriteFixedSizeListSlicedMatchesDirect) {
+  adbc_validation::Handle<struct ArrowSchema> schema;
+  adbc_validation::Handle<struct ArrowArray> source;
+  adbc_validation::Handle<struct ArrowArray> tail;
+  struct ArrowError na_error;
+
+  // Two FIXED_SIZE_LIST schemas of size 2 — one for the 6-row source, one
+  // for the 3-row reference. Both are independently allocated because
+  // MakeBatch consumes the schema state.
+  auto build_schema = [](struct ArrowSchema* out) {
+    ASSERT_EQ(ArrowSchemaInitFromType(out, NANOARROW_TYPE_STRUCT), NANOARROW_OK);
+    ASSERT_EQ(ArrowSchemaAllocateChildren(out, 1), NANOARROW_OK);
+    ArrowSchemaInit(out->children[0]);
+    ASSERT_EQ(
+        ArrowSchemaSetTypeFixedSize(out->children[0], NANOARROW_TYPE_FIXED_SIZE_LIST, 2),
+        NANOARROW_OK);
+    ASSERT_EQ(ArrowSchemaSetName(out->children[0], "col"), NANOARROW_OK);
+    ASSERT_EQ(ArrowSchemaSetType(out->children[0]->children[0], NANOARROW_TYPE_INT32),
+              NANOARROW_OK);
+  };
+
+  adbc_validation::Handle<struct ArrowSchema> tail_schema;
+  build_schema(&schema.value);
+  build_schema(&tail_schema.value);
+
+  ASSERT_EQ(adbc_validation::MakeBatch<std::vector<int32_t>>(
+                &schema.value, &source.value, &na_error,
+                {std::vector<int32_t>{1, 2}, std::vector<int32_t>{3, 4}, std::nullopt,
+                 std::vector<int32_t>{5, 6}, std::vector<int32_t>{7, 8}, std::nullopt}),
+            ADBC_STATUS_OK);
+
+  ASSERT_EQ(adbc_validation::MakeBatch<std::vector<int32_t>>(
+                &tail_schema.value, &tail.value, &na_error,
+                {std::vector<int32_t>{5, 6}, std::vector<int32_t>{7, 8}, std::nullopt}),
+            ADBC_STATUS_OK);
+
+  PostgresCopyStreamWriteTester ref_tester;
+  ASSERT_EQ(ref_tester.Init(&tail_schema.value, &tail.value, *type_resolver_),
+            NANOARROW_OK);
+  ASSERT_EQ(ref_tester.WriteAll(nullptr), ENODATA);
+  const struct ArrowBuffer ref_buf = ref_tester.WriteBuffer();
+
+  source->offset = 0;
+  source->length = 3;
+  source->children[0]->offset = 3;
+  source->children[0]->length = 3;
+
+  PostgresCopyStreamWriteTester sliced_tester;
+  ASSERT_EQ(sliced_tester.Init(&schema.value, &source.value, *type_resolver_),
+            NANOARROW_OK);
+  ASSERT_EQ(sliced_tester.WriteAll(nullptr), ENODATA);
+  const struct ArrowBuffer sliced_buf = sliced_tester.WriteBuffer();
+
+  ASSERT_EQ(sliced_buf.size_bytes, ref_buf.size_bytes);
+  for (int64_t i = 0; i < sliced_buf.size_bytes; i++) {
+    ASSERT_EQ(sliced_buf.data[i], ref_buf.data[i]) << "failure at index " << i;
   }
 }
 

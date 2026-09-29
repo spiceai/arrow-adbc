@@ -31,6 +31,7 @@ class PostgreSQLQuirks(model.DriverQuirks):
     features = model.DriverFeatures(
         connection_get_table_schema=True,
         connection_transactions=True,
+        get_objects=True,
         get_objects_constraints_foreign=False,
         get_objects_constraints_primary=False,
         get_objects_constraints_unique=False,
@@ -40,11 +41,12 @@ class PostgreSQLQuirks(model.DriverQuirks):
         statement_bulk_ingest_temporary=False,
         statement_execute_schema=True,
         statement_get_parameter_schema=True,
+        statement_prepare=True,
         statement_rows_affected=True,
         statement_rows_affected_ddl=False,
         current_catalog="postgres",
         current_schema="public",
-        supported_xdbc_fields=[],
+        supported_xdbc_fields=["xdbc_type_name"],
     )
     setup = model.DriverSetup(
         database={

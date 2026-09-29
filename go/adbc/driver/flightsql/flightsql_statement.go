@@ -20,6 +20,7 @@ package flightsql
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"unsafe"
 
 	"github.com/apache/arrow-adbc/go/adbc"
+	"github.com/apache/arrow-adbc/go/adbc/driver/internal"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/flight"
@@ -179,6 +181,8 @@ type statement struct {
 	// Bound data for bulk ingest
 	bound      arrow.RecordBatch
 	streamBind array.RecordReader
+	id         string
+	log        *slog.Logger
 }
 
 func (s *statement) closePreparedStatement() error {
@@ -490,7 +494,23 @@ func (s *statement) SetSqlQuery(query string) error {
 	}
 	s.targetTable = ""
 	s.query.setSqlQuery(query)
+	if s.log != nil {
+		s.log.Debug("FlightSQL SetSqlQuery", s.queryAttrs()...)
+	}
 	return nil
+}
+
+func (s *statement) queryAttrs() []any {
+	if s.query.sqlQuery != "" {
+		return queryFingerprintAttrs(s.query.sqlQuery)
+	}
+	if s.query.substraitPlan != nil {
+		return substraitFingerprintAttrs(s.query.substraitPlan, s.query.substraitVersion)
+	}
+	if s.targetTable != "" {
+		return []any{slog.String("query_type", "ingest"), slog.String("target_table", s.targetTable)}
+	}
+	return []any{slog.String("query_type", "none")}
 }
 
 // ExecuteQuery executes the current query or prepared statement
@@ -503,11 +523,30 @@ func (s *statement) ExecuteQuery(ctx context.Context) (rdr array.RecordReader, n
 		return nil, -1, err
 	}
 
+	// Reject staged binds if no ingest target was provided
+	if s.targetTable == "" && s.prepared == nil && (s.bound != nil || s.streamBind != nil) {
+		return nil, -1, adbc.Error{
+			Msg:  "[Flight SQL Statement] must set IngestTargetTable before bulk ingestion",
+			Code: adbc.StatusInvalidState,
+		}
+	}
+
+	ctx, span := internal.StartSpan(ctx, "FlightSQLStatement.ExecuteQuery", s.cnxn)
+	// TODO(apache/arrow-adbc#4494): replace with a shared telemetry helper.
+	defer func() { internal.EndSpan(span, err) }()
+
 	// Handle bulk ingest
 	if s.targetTable != "" {
 		nrec, err = s.executeIngest(ctx)
 		return nil, nrec, err
 	}
+
+	startTime := time.Now()
+	startAttrs := append([]any{
+		slog.Bool("prepared", s.prepared != nil),
+		slog.Bool("hasTxn", s.cnxn.txn != nil),
+	}, s.queryAttrs()...)
+	s.log.InfoContext(ctx, "FlightSQL ExecuteQuery start", startAttrs...)
 
 	ctx = metadata.NewOutgoingContext(ctx, s.hdrs)
 	var info *flight.FlightInfo
@@ -519,12 +558,37 @@ func (s *statement) ExecuteQuery(ctx context.Context) (rdr array.RecordReader, n
 		info, err = s.query.execute(ctx, s.cnxn, opts...)
 	}
 
+	defer func() {
+		finishAttrs := []any{
+			slog.Duration("duration", time.Since(startTime)),
+			slog.String("phase", "GetFlightInfo"),
+		}
+		if info != nil {
+			finishAttrs = append(finishAttrs, flightInfoLogAttrs(info)...)
+		}
+		finishAttrs = append(finishAttrs, correlationHeaderAttrs(header)...)
+		finishAttrs = append(finishAttrs, correlationHeaderAttrs(trailer)...)
+		if err != nil {
+			finishAttrs = append(finishAttrs, "err", err)
+			s.log.WarnContext(ctx, "FlightSQL ExecuteQuery finished with error", finishAttrs...)
+		} else {
+			s.log.InfoContext(ctx, "FlightSQL ExecuteQuery finished", finishAttrs...)
+		}
+	}()
+
 	if err != nil {
 		return nil, -1, adbcFromFlightStatusWithDetails(err, header, trailer, "ExecuteQuery")
 	}
 
 	nrec = info.TotalRecords
-	rdr, err = newRecordReader(ctx, s.alloc, s.cnxn.cl, info, s.clientCache, s.queueSize, s.timeouts)
+	rdr, err = newRecordReader(ctx, recordReaderConfig{
+		alloc:       s.alloc,
+		cl:          s.cnxn.cl,
+		info:        info,
+		clientCache: s.clientCache,
+		bufferSize:  s.queueSize,
+		logger:      s.log,
+	}, s.timeouts)
 	return
 }
 
@@ -535,10 +599,29 @@ func (s *statement) ExecuteUpdate(ctx context.Context) (n int64, err error) {
 		return -1, err
 	}
 
+	// Reject staged binds if no ingest target was provided
+	if s.targetTable == "" && s.prepared == nil && (s.bound != nil || s.streamBind != nil) {
+		return -1, adbc.Error{
+			Msg:  "[Flight SQL Statement] must set IngestTargetTable before bulk ingestion",
+			Code: adbc.StatusInvalidState,
+		}
+	}
+
+	ctx, span := internal.StartSpan(ctx, "FlightSQLStatement.ExecuteUpdate", s.cnxn)
+	// TODO(apache/arrow-adbc#4494): replace with a shared telemetry helper.
+	defer func() { internal.EndSpan(span, err) }()
+
 	// Handle bulk ingest
 	if s.targetTable != "" {
 		return s.executeIngest(ctx)
 	}
+
+	startTime := time.Now()
+	startAttrs := append([]any{
+		slog.Bool("prepared", s.prepared != nil),
+		slog.Bool("hasTxn", s.cnxn.txn != nil),
+	}, s.queryAttrs()...)
+	s.log.InfoContext(ctx, "FlightSQL ExecuteUpdate start", startAttrs...)
 
 	ctx = metadata.NewOutgoingContext(ctx, s.hdrs)
 	var header, trailer metadata.MD
@@ -549,6 +632,21 @@ func (s *statement) ExecuteUpdate(ctx context.Context) (n int64, err error) {
 		n, err = s.query.executeUpdate(ctx, s.cnxn, opts...)
 	}
 
+	defer func() {
+		finishAttrs := []any{
+			slog.Duration("duration", time.Since(startTime)),
+			slog.Int64("rowsAffected", n),
+		}
+		finishAttrs = append(finishAttrs, correlationHeaderAttrs(header)...)
+		finishAttrs = append(finishAttrs, correlationHeaderAttrs(trailer)...)
+		if err != nil {
+			finishAttrs = append(finishAttrs, "err", err)
+			s.log.WarnContext(ctx, "FlightSQL ExecuteUpdate finished with error", finishAttrs...)
+		} else {
+			s.log.InfoContext(ctx, "FlightSQL ExecuteUpdate finished", finishAttrs...)
+		}
+	}()
+
 	if err != nil {
 		err = adbcFromFlightStatusWithDetails(err, header, trailer, "ExecuteQuery")
 	}
@@ -558,10 +656,30 @@ func (s *statement) ExecuteUpdate(ctx context.Context) (n int64, err error) {
 
 // Prepare turns this statement into a prepared statement to be executed
 // multiple times. This invalidates any prior result sets.
-func (s *statement) Prepare(ctx context.Context) error {
+func (s *statement) Prepare(ctx context.Context) (err error) {
+	ctx, span := internal.StartSpan(ctx, "FlightSQLStatement.Prepare", s.cnxn)
+	// TODO(apache/arrow-adbc#4494): replace with a shared telemetry helper.
+	defer func() { internal.EndSpan(span, err) }()
+
+	startTime := time.Now()
+	s.log.InfoContext(ctx, "FlightSQL Prepare start", s.queryAttrs()...)
+
 	ctx = metadata.NewOutgoingContext(ctx, s.hdrs)
 	var header, trailer metadata.MD
 	prep, err := s.query.prepare(ctx, s.cnxn, grpc.Header(&header), grpc.Trailer(&trailer), s.timeouts)
+
+	defer func() {
+		finishAttrs := []any{slog.Duration("duration", time.Since(startTime))}
+		finishAttrs = append(finishAttrs, correlationHeaderAttrs(header)...)
+		finishAttrs = append(finishAttrs, correlationHeaderAttrs(trailer)...)
+		if err != nil {
+			finishAttrs = append(finishAttrs, "err", err)
+			s.log.WarnContext(ctx, "FlightSQL Prepare finished with error", finishAttrs...)
+		} else {
+			s.log.InfoContext(ctx, "FlightSQL Prepare finished", finishAttrs...)
+		}
+	}()
+
 	if err != nil {
 		return adbcFromFlightStatusWithDetails(err, header, trailer, "Prepare")
 	}
@@ -600,31 +718,27 @@ func (s *statement) SetSubstraitPlan(plan []byte) error {
 // but it may not do this until the statement is closed or another
 // record is bound.
 func (s *statement) Bind(_ context.Context, values arrow.RecordBatch) error {
-	// For bulk ingest, bind to the statement
-	if s.targetTable != "" {
-		if s.streamBind != nil {
-			s.streamBind.Release()
-			s.streamBind = nil
-		}
-		if s.bound != nil {
-			s.bound.Release()
-		}
-		s.bound = values
-		if s.bound != nil {
-			s.bound.Retain()
-		}
+	if s.targetTable != "" || s.prepared == nil {
+		s.setBound(values)
 		return nil
 	}
 
-	if s.prepared == nil {
-		return adbc.Error{
-			Msg:  "[Flight SQL Statement] must call Prepare or set IngestTargetTable before calling Bind",
-			Code: adbc.StatusInvalidState}
-	}
-
-	// calls retain
 	s.prepared.SetParameters(values)
 	return nil
+}
+
+func (s *statement) setBound(values arrow.RecordBatch) {
+	if s.streamBind != nil {
+		s.streamBind.Release()
+		s.streamBind = nil
+	}
+	if s.bound != nil {
+		s.bound.Release()
+	}
+	s.bound = values
+	if s.bound != nil {
+		s.bound.Retain()
+	}
 }
 
 // BindStream uses a record batch stream to bind parameters for this
@@ -633,31 +747,27 @@ func (s *statement) Bind(_ context.Context, values arrow.RecordBatch) error {
 // The driver will call Release on the record reader, but may not do this
 // until Close is called.
 func (s *statement) BindStream(_ context.Context, stream array.RecordReader) error {
-	// For bulk ingest, bind to the statement
-	if s.targetTable != "" {
-		if s.bound != nil {
-			s.bound.Release()
-			s.bound = nil
-		}
-		if s.streamBind != nil {
-			s.streamBind.Release()
-		}
-		s.streamBind = stream
-		if s.streamBind != nil {
-			s.streamBind.Retain()
-		}
+	if s.targetTable != "" || s.prepared == nil {
+		s.setStreamBound(stream)
 		return nil
 	}
 
-	if s.prepared == nil {
-		return adbc.Error{
-			Msg:  "[Flight SQL Statement] must call Prepare or set IngestTargetTable before calling Bind",
-			Code: adbc.StatusInvalidState}
-	}
-
-	// calls retain
 	s.prepared.SetRecordReader(stream)
 	return nil
+}
+
+func (s *statement) setStreamBound(stream array.RecordReader) {
+	if s.bound != nil {
+		s.bound.Release()
+		s.bound = nil
+	}
+	if s.streamBind != nil {
+		s.streamBind.Release()
+	}
+	s.streamBind = stream
+	if s.streamBind != nil {
+		s.streamBind.Retain()
+	}
 }
 
 // GetParameterSchema returns an Arrow schema representation of
@@ -811,7 +921,7 @@ func (s *statement) ExecutePartitions(ctx context.Context) (*arrow.Schema, adbc.
 		data, err := proto.Marshal(partition)
 		if err != nil {
 			return sc, out, -1, adbc.Error{
-				Msg:  err.Error(),
+				Msg:  fmt.Sprintf("[flightsql] could not marshal partition as FlightInfo: %v", err),
 				Code: adbc.StatusInternal,
 			}
 		}

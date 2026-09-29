@@ -28,7 +28,14 @@
 //
 //	db, err := sql.Open("flightsql", "uri=<flight sql db url>")
 //
-// The URI passed *must* contain a scheme, most likely "grpc+tcp://"
+// The URI passed *must* contain a scheme, most likely "flightsql://"
+// (secure TLS by default; add "?transport=tcp" for plaintext or
+// "?transport=unix" for a Unix domain socket, whose path is always
+// insecure/plaintext). The "transport" value is matched
+// case-insensitively, and an unrecognized value is rejected rather
+// than silently falling back to a default. The legacy "grpc://",
+// "grpc+tcp://", "grpc+tls://", and "grpc+unix://" schemes are also
+// still accepted.
 package flightsql
 
 import (
@@ -131,7 +138,16 @@ func (d *driverImpl) NewDatabaseWithOptionsContext(ctx context.Context, opts map
 	}
 	delete(opts, adbc.OptionKeyURI)
 
-	dbBase, err := driverbase.NewDatabaseImplBase(ctx, &d.DriverImplBase)
+	tracesExporter := opts[adbc.OptionKeyTelemetryTracesExporter]
+	delete(opts, adbc.OptionKeyTelemetryTracesExporter)
+
+	tracesFolderPath := opts[adbc.OptionKeyTelemetryTracesFolderPath]
+	delete(opts, adbc.OptionKeyTelemetryTracesFolderPath)
+
+	dbBase, err := driverbase.NewDatabaseImplBase(ctx, &d.DriverImplBase, driverbase.TracingOptions{
+		ExporterName:      tracesExporter,
+		TracingFolderPath: tracesFolderPath,
+	})
 	if err != nil {
 		return nil, err
 	}

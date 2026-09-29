@@ -37,7 +37,7 @@ public class AdbcException extends Exception {
   private final AdbcStatusCode status;
   private final @Nullable String sqlState;
   private final int vendorCode;
-  private Collection<ErrorDetail> details;
+  private final Collection<ErrorDetail> details;
 
   public AdbcException(
       @Nullable String message,
@@ -70,6 +70,11 @@ public class AdbcException extends Exception {
   /** Create a new exception with code {@link AdbcStatusCode#IO}. */
   public static AdbcException io(String message) {
     return new AdbcException(message, /*cause*/ null, AdbcStatusCode.IO, null, 0);
+  }
+
+  /** Create a new exception with code {@link AdbcStatusCode#INTERNAL}. */
+  public static AdbcException internal(String message) {
+    return new AdbcException(message, /*cause*/ null, AdbcStatusCode.INTERNAL, null, 0);
   }
 
   /** Create a new exception with code {@link AdbcStatusCode#INVALID_STATE}. */

@@ -91,10 +91,12 @@ static const char* kTablesQueryAll =
 // Parameterized on schema_name, table_name
 static const char* kColumnsQueryAll =
     "SELECT attr.attname, attr.attnum, "
-    "pg_catalog.col_description(cls.oid, attr.attnum) "
+    "pg_catalog.col_description(cls.oid, attr.attnum), "
+    "typ.typname "
     "FROM pg_catalog.pg_attribute AS attr "
     "INNER JOIN pg_catalog.pg_class AS cls ON attr.attrelid = cls.oid "
     "INNER JOIN pg_catalog.pg_namespace AS nsp ON nsp.oid = cls.relnamespace "
+    "INNER JOIN pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid "
     "WHERE attr.attnum > 0 AND NOT attr.attisdropped "
     "AND nsp.nspname LIKE $1 AND cls.relname LIKE $2";
 
@@ -186,13 +188,6 @@ class PostgresGetObjectsHelper : public adbc::driver::GetObjectsHelper {
         some_columns_(conn, ColumnsQuery()),
         all_constraints_(conn, kConstraintsQueryAll),
         some_constraints_(conn, ConstraintsQuery()) {}
-
-  // Allow Redshift to execute this query without constraints
-  // TODO(paleolimbot): Investigate to see if we can simplify the constraints query so
-  // that it works on both!
-  void SetEnableConstraints(bool enable_constraints) {
-    enable_constraints_ = enable_constraints;
-  }
 
   Status Load(adbc::driver::GetObjectsDepth depth,
               std::optional<std::string_view> catalog_filter,
@@ -288,16 +283,13 @@ class PostgresGetObjectsHelper : public adbc::driver::GetObjectsHelper {
       next_column_ = all_columns_.Row(-1);
     }
 
-    if (enable_constraints_) {
-      if (column_filter.has_value()) {
-        UNWRAP_STATUS(some_constraints_.Execute(
-            {std::string(schema), std::string(table), std::string(*column_filter)}))
-        next_constraint_ = some_constraints_.Row(-1);
-      } else {
-        UNWRAP_STATUS(
-            all_constraints_.Execute({std::string(schema), std::string(table)}));
-        next_constraint_ = all_constraints_.Row(-1);
-      }
+    if (column_filter.has_value()) {
+      UNWRAP_STATUS(some_constraints_.Execute(
+          {std::string(schema), std::string(table), std::string(*column_filter)}))
+      next_constraint_ = some_constraints_.Row(-1);
+    } else {
+      UNWRAP_STATUS(all_constraints_.Execute({std::string(schema), std::string(table)}));
+      next_constraint_ = all_constraints_.Row(-1);
     }
 
     return Status::Ok();
@@ -316,6 +308,12 @@ class PostgresGetObjectsHelper : public adbc::driver::GetObjectsHelper {
     col.ordinal_position = static_cast<int32_t>(ordinal_position);
     if (!next_column_[2].is_null) {
       col.remarks = next_column_[2].value();
+    }
+    if (!next_column_[3].is_null) {
+      if (!col.xdbc) {
+        col.xdbc = adbc::driver::GetObjectsHelper::ColumnXdbc();
+      }
+      col.xdbc->xdbc_type_name = next_column_[3].value();
     }
 
     return col;
@@ -375,9 +373,6 @@ class PostgresGetObjectsHelper : public adbc::driver::GetObjectsHelper {
   PqResultHelper some_columns_;
   PqResultHelper all_constraints_;
   PqResultHelper some_constraints_;
-
-  // On Redshift, the constraints query fails
-  bool enable_constraints_{true};
 
   // Iterator state for the catalogs/schema/table/column queries
   PqResultRow next_catalog_;
@@ -491,12 +486,37 @@ AdbcStatusCode PostgresConnection::Commit(struct AdbcError* error) {
     return ADBC_STATUS_OK;
   }
 
-  PGresult* result = PQexec(conn_, "COMMIT; BEGIN TRANSACTION");
+  PGresult* result = PQexec(conn_, "COMMIT");
   if (PQresultStatus(result) != PGRES_COMMAND_OK) {
     AdbcStatusCode code = SetError(error, result, "%s%s",
                                    "[libpq] Failed to commit: ", PQerrorMessage(conn_));
     PQclear(result);
     return code;
+  }
+  PQclear(result);
+  return ADBC_STATUS_OK;
+}
+
+AdbcStatusCode PostgresConnection::EnsureTransaction(struct AdbcError* error) {
+  if (autocommit_) {
+    return ADBC_STATUS_OK;
+  }
+  auto txstatus = PQtransactionStatus(conn_);
+  if (txstatus == PQTRANS_ACTIVE || txstatus == PQTRANS_INTRANS) {
+    return ADBC_STATUS_OK;
+  } else if (txstatus == PQTRANS_INERROR) {
+    InternalAdbcSetError(error,
+                         "[libpq] cannot start transaction: "
+                         "the connection is in an error state; first rollback");
+    return ADBC_STATUS_INVALID_STATE;
+  }
+
+  PGresult* result = PQexec(conn_, "BEGIN TRANSACTION");
+  if (PQresultStatus(result) != PGRES_COMMAND_OK) {
+    InternalAdbcSetError(error, "%s%s",
+                         "[libpq] Failed to begin transaction: ", PQerrorMessage(conn_));
+    PQclear(result);
+    return ADBC_STATUS_IO;
   }
   PQclear(result);
   return ADBC_STATUS_OK;
@@ -520,28 +540,19 @@ AdbcStatusCode PostgresConnection::GetInfo(struct AdbcConnection* connection,
         infos.push_back({info_codes[i], std::string(VendorName())});
         break;
       case ADBC_INFO_VENDOR_VERSION: {
-        if (VendorName() == "Redshift") {
-          const std::array<int, 3>& version = VendorVersion();
-          std::string version_string = std::to_string(version[0]) + "." +
-                                       std::to_string(version[1]) + "." +
-                                       std::to_string(version[2]);
-          infos.push_back({info_codes[i], std::move(version_string)});
-
-        } else {
-          // Gives a version in the form 140000 instead of 14.0.0
-          const char* stmt = "SHOW server_version_num";
-          auto result_helper = PqResultHelper{conn_, std::string(stmt)};
-          RAISE_STATUS(error, result_helper.Execute());
-          auto it = result_helper.begin();
-          if (it == result_helper.end()) {
-            InternalAdbcSetError(error, "[libpq] PostgreSQL returned no rows for '%s'",
-                                 stmt);
-            return ADBC_STATUS_INTERNAL;
-          }
-          const char* server_version_num = (*it)[0].data;
-          infos.push_back({info_codes[i], server_version_num});
+        RAISE_ADBC(EnsureTransaction(error));
+        // Gives a version in the form 140000 instead of 14.0.0
+        const char* stmt = "SHOW server_version_num";
+        auto result_helper = PqResultHelper{conn_, std::string(stmt)};
+        RAISE_STATUS(error, result_helper.Execute());
+        auto it = result_helper.begin();
+        if (it == result_helper.end()) {
+          InternalAdbcSetError(error, "[libpq] PostgreSQL returned no rows for '%s'",
+                               stmt);
+          return ADBC_STATUS_INTERNAL;
         }
-
+        const char* server_version_num = (*it)[0].data;
+        infos.push_back({info_codes[i], server_version_num});
         break;
       }
       case ADBC_INFO_DRIVER_NAME:
@@ -572,7 +583,6 @@ AdbcStatusCode PostgresConnection::GetObjects(
     const char* db_schema, const char* table_name, const char** table_type,
     const char* column_name, struct ArrowArrayStream* out, struct AdbcError* error) {
   PostgresGetObjectsHelper helper(conn_);
-  helper.SetEnableConstraints(VendorName() != "Redshift");
 
   const auto catalog_filter =
       catalog ? std::make_optional(std::string_view(catalog)) : std::nullopt;
@@ -610,6 +620,8 @@ AdbcStatusCode PostgresConnection::GetObjects(
       return Status::InvalidArgument("[libpq] GetObjects: invalid depth ", c_depth)
           .ToAdbc(error);
   }
+
+  RAISE_ADBC(EnsureTransaction(error));
 
   auto status = BuildGetObjects(&helper, depth, catalog_filter, schema_filter,
                                 table_filter, column_filter, table_type_filter, out);
@@ -962,6 +974,8 @@ AdbcStatusCode PostgresConnection::GetStatistics(const char* catalog,
     return ADBC_STATUS_NOT_IMPLEMENTED;
   }
 
+  RAISE_ADBC(EnsureTransaction(error));
+
   struct ArrowSchema schema;
   std::memset(&schema, 0, sizeof(schema));
   struct ArrowArray array;
@@ -1035,6 +1049,8 @@ AdbcStatusCode PostgresConnection::GetTableSchema(const char* catalog,
                                                   const char* table_name,
                                                   struct ArrowSchema* schema,
                                                   struct AdbcError* error) {
+  RAISE_ADBC(EnsureTransaction(error));
+
   AdbcStatusCode final_status = ADBC_STATUS_OK;
 
   char* quoted = PQescapeIdentifier(conn_, table_name, strlen(table_name));
@@ -1158,7 +1174,7 @@ AdbcStatusCode PostgresConnection::Rollback(struct AdbcError* error) {
     return ADBC_STATUS_OK;
   }
 
-  PGresult* result = PQexec(conn_, "ROLLBACK AND CHAIN");
+  PGresult* result = PQexec(conn_, "ROLLBACK");
   if (PQresultStatus(result) != PGRES_COMMAND_OK) {
     InternalAdbcSetError(error, "%s%s",
                          "[libpq] Failed to rollback: ", PQerrorMessage(conn_));
@@ -1189,16 +1205,16 @@ AdbcStatusCode PostgresConnection::SetOption(const char* key, const char* value,
     }
 
     if (autocommit != autocommit_) {
-      const char* query = autocommit ? "COMMIT" : "BEGIN TRANSACTION";
-
-      PGresult* result = PQexec(conn_, query);
-      if (PQresultStatus(result) != PGRES_COMMAND_OK) {
-        InternalAdbcSetError(error, "%s%s", "[libpq] Failed to update autocommit: ",
-                             PQerrorMessage(conn_));
+      if (autocommit && PQtransactionStatus(conn_) != PQTRANS_IDLE) {
+        PGresult* result = PQexec(conn_, "COMMIT");
+        if (PQresultStatus(result) != PGRES_COMMAND_OK) {
+          InternalAdbcSetError(error, "%s%s", "[libpq] Failed to update autocommit: ",
+                               PQerrorMessage(conn_));
+          PQclear(result);
+          return ADBC_STATUS_IO;
+        }
         PQclear(result);
-        return ADBC_STATUS_IO;
       }
-      PQclear(result);
       autocommit_ = autocommit;
     }
     return ADBC_STATUS_OK;

@@ -131,6 +131,13 @@ repos:
       pass_filenames: true
       files: '(^\.pre-commit-config\.yaml$)|(^\.github/workflows/.*\.(yml|yaml)$)'
       entry: "./ci/scripts/run_pre_commit_pin.py"
+    - id: dotnet-format
+      name: C# Format
+      language: system
+      entry: |
+        dotnet format csharp/Apache.Arrow.Adbc.sln --verify-no-changes
+      always_run: true
+      pass_filenames: false
   - repo: https://github.com/doublify/pre-commit-rust
     rev: eeee35a89e69d5772bdee97db1a6a898467b686e  # v1.0
     hooks:
@@ -138,10 +145,12 @@ repos:
       name: rustfmt
       files: ^rust/
       args: ["--all", "--manifest-path", "rust/Cargo.toml", "--"]
+      pass_filenames: false
     - id: fmt
       name: rustfmt-node
       files: ^javascript/
       args: ["--all", "--manifest-path", "javascript/Cargo.toml", "--"]
+      pass_filenames: false
   - repo: https://github.com/codespell-project/codespell
     rev: 63c8f8312b7559622c0d82815639671ae42132ac  # v2.4.1
     hooks:
