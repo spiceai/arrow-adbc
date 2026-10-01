@@ -107,7 +107,7 @@ unsafe extern "C" fn statement_new(
     _error: *mut adbc_ffi::FFI_AdbcError,
 ) -> AdbcStatusCode {
     // Non-null private data is what marks a statement as allocated.
-    unsafe { (*statement).private_data = 1 as *mut c_void };
+    unsafe { (*statement).private_data = std::ptr::dangling_mut::<c_void>() };
     ADBC_STATUS_OK
 }
 
