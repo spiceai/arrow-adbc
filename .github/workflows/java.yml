@@ -50,12 +50,12 @@ jobs:
       matrix:
         java: ['11', '17', '21', '25']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           cache: "maven"
           distribution: "temurin"
@@ -76,12 +76,12 @@ jobs:
       matrix:
         java: ['21', '25']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           cache: "maven"
           distribution: "temurin"
@@ -111,16 +111,18 @@ jobs:
     strategy:
       matrix:
         include:
-          - { os: Linux, arch: amd64, vcpkg_arch: x64, runner: ubuntu-latest }
+          - { os: Linux, arch: amd64, vcpkg_arch: x64, runner: ubuntu-latest, platform: "linux/amd64" }
+          - { os: Linux, arch: arm64v8, vcpkg_arch: arm64, runner: ubuntu-24.04-arm, platform: "linux/arm64/v8" }
           - { os: macOS, arch: arm64v8, vcpkg_arch: arm64, runner: macos-latest }
+          - { os: Windows, arch: amd64, vcpkg_arch: x64, runner: windows-latest }
     env:
       VCPKG_ROOT: "${{ github.workspace }}/vcpkg"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           cache: "maven"
           distribution: "temurin"
@@ -132,7 +134,7 @@ jobs:
       - name: Install vcpkg
         run: |
           ./ci/scripts/install_vcpkg.sh $VCPKG_ROOT $VCPKG_VERSION
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "${{ env.GO_VERSION }}"
           check-latest: true
@@ -141,23 +143,48 @@ jobs:
       - name: Install Homebrew dependencies
         if: matrix.os == 'macOS'
         run: brew install autoconf bash pkg-config ninja
-      - name: Build artifacts
-        if: matrix.os != 'macOS'
+      - name: Build artifacts (Linux)
+        if: matrix.os == 'Linux'
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           docker compose run python-wheel-manylinux-build
       - name: Build artifacts (macOS)
         if: matrix.os == 'macOS'
         run: |
-          # XXX(https://github.com/apache/arrow-adbc/issues/3382)
-          sudo xcode-select -s "/Applications/Xcode_16.app"
-
           export ADBC_BUILD_STATIC=ON
           export ADBC_BUILD_TESTS=OFF
           export ADBC_USE_ASAN=OFF
           export ADBC_USE_UBSAN=OFF
           ./ci/scripts/python_wheel_unix_build.sh ${{ matrix.arch }} $(pwd) $(pwd)/build
+      - name: Build artifacts (Windows)
+        if: matrix.os == 'Windows'
+        # TODO(https://github.com/apache/arrow-adbc/issues/4269): remove cmd.exe usage
+        shell: cmd # zizmor: ignore[misfeature]
+        run: |
+          .\ci\scripts\python_wheel_windows_build.bat %cd% %cd%\build\${{ matrix.vcpkg_arch }}
+
+      - name: Build driver manager (Windows)
+        if: matrix.os == 'Windows'
+        run: |
+          ls -laR $(pwd)/build/${{ matrix.vcpkg_arch }}
+          rm -rf $(pwd)/build/${{ matrix.vcpkg_arch }}/bin/adbc_driver_manager.dll
+          rm -rf $(pwd)/build/${{ matrix.vcpkg_arch }}/driver_manager
+
+      # I think static and shared conflict on Windows so build static separately
+      - name: Build driver manager (Windows)
+        if: matrix.os == 'Windows'
+        # TODO(https://github.com/apache/arrow-adbc/issues/4269): remove cmd.exe usage
+        shell: cmd # zizmor: ignore[misfeature]
+        run: |
+          cmake -G "Visual Studio 18 2026" -A x64 -DADBC_BUILD_SHARED=OFF -DADBC_BUILD_STATIC=ON -DCMAKE_VERBOSE_MAKEFILE=ON -DADBC_DRIVER_MANAGER=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=%cd%\build\${{ matrix.vcpkg_arch }} -B %cd%\buildmanager %cd%\c || exit /B 1
+          cmake --build %cd%\buildmanager --config Debug --target install --verbose -j || exit /B 1
+
       - name: Build JNI artifacts
         run: |
+          ls -l $(pwd)/build/${{ matrix.vcpkg_arch }}
+
           export ADBC_BUILD_STATIC=ON
           export ADBC_BUILD_TESTS=OFF
           export ADBC_USE_ASAN=OFF
@@ -165,6 +192,7 @@ jobs:
           ./ci/scripts/java_build.sh $(pwd)
           ./ci/scripts/java_jni_build.sh $(pwd) $(pwd)/build_jni $(pwd)/build/${{ matrix.vcpkg_arch }}
       - name: Assemble artifacts
+        if: matrix.os != 'Windows'
         run: |
           mkdir artifacts
           cp -r java/driver/jni/src/main/resources/ artifacts/jni
@@ -172,7 +200,16 @@ jobs:
           ls -laR artifacts
           mv artifacts artifacts-${{ matrix.os }}-${{ matrix.arch }}
           tar czf artifacts-${{ matrix.os }}-${{ matrix.arch }}.tgz artifacts-${{ matrix.os }}-${{ matrix.arch }}
-      - uses: actions/upload-artifact@v7
+      - name: Assemble artifacts (Windows)
+        if: matrix.os == 'Windows'
+        run: |
+          mkdir -p artifacts/driver
+          cp -r java/driver/jni/src/main/resources/ artifacts/jni
+          cp -r build/${{ matrix.vcpkg_arch }}/bin/*.dll artifacts/driver
+          ls -laR artifacts
+          mv artifacts artifacts-${{ matrix.os }}-${{ matrix.arch }}
+          tar czf artifacts-${{ matrix.os }}-${{ matrix.arch }}.tgz artifacts-${{ matrix.os }}-${{ matrix.arch }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: jni-artifacts-${{ matrix.os }}-${{ matrix.arch }}
           retention-days: 7
@@ -183,11 +220,15 @@ jobs:
         run: |
           mkdir ~/logs
           find "$VCPKG_ROOT" -name 'build-*.log' -exec cp '{}' ~/logs ';'
+
+          if [[ -d "$(pwd)/build/${{ matrix.vcpkg_arch }}" ]]; then
+            mv "$(pwd)/build/${{ matrix.vcpkg_arch }}" ~/logs/artifacts
+          fi
       - name: Upload failure logs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: jni-artifacts-${{ matrix.os }}-${{ matrix.arch }}
+          name: jni-debug-logs-${{ matrix.os }}-${{ matrix.arch }}
           retention-days: 7
           path: ~/logs
 
@@ -199,39 +240,134 @@ jobs:
     strategy:
       matrix:
         include:
-          - { java: '11', os: Linux, arch: amd64, vcpkg_arch: x64, runner: ubuntu-latest }
-          - { java: '25', os: Linux, arch: amd64, vcpkg_arch: x64, runner: ubuntu-latest }
-          - { java: '11', os: macOS, arch: arm64v8, vcpkg_arch: arm64, runner: macos-latest }
-          - { java: '25', os: macOS, arch: arm64v8, vcpkg_arch: arm64, runner: macos-latest }
+          # To keep the matrix down, only test Java 11 on some platforms
+          - { java: '11', os: Linux, arch: amd64, runner: ubuntu-latest }
+          - { java: '11', os: macOS, arch: arm64v8, runner: macos-latest }
+          - { java: '11', os: Windows, arch: amd64, runner: windows-latest }
+          - { java: '11', os: Linux, arch: arm64v8, runner: ubuntu-24.04-arm }
+
+          - { java: '25', os: Linux, arch: amd64, runner: ubuntu-latest }
+          - { java: '25', os: macOS, arch: arm64v8, runner: macos-latest }
+          - { java: '25', os: Windows, arch: amd64, runner: windows-latest }
+      max-parallel: 4
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           pattern: jni-artifacts-*
           merge-multiple: true
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           cache: "maven"
           distribution: "temurin"
           java-version: 11
-      - name: Build/Test
+      - name: Build
         run: |
           set -x
           pushd artifacts
-          for archive in artifacts*.tgz; do
-            tar xvf $archive
-          done
+          tar xvf artifacts-${{ matrix.os }}-${{ matrix.arch }}.tgz
           popd
-          cp -r artifacts/*/jni/adbc_driver_jni java/driver/jni/src/main/resources
+          cp -r artifacts/artifacts-${{ matrix.os }}-${{ matrix.arch }}/jni/adbc_driver_jni java/driver/jni/src/main/resources
+          env BUILD_JNI=ON ./ci/scripts/java_build.sh $(pwd)
+
+      - name: Set environment variables
+        if: matrix.os == 'Linux' && matrix.arch == 'amd64'
+        run: |
+          cat .env | grep -v -e '^#' | grep -e '^ADBC_' | awk NF | sed 's/"//g' | tee -a $GITHUB_ENV
+
+      # no mssql
+      - name: Set environment variables
+        if: matrix.os == 'Linux' && matrix.arch == 'arm64v8'
+        run: |
+          cat .env | grep -v -e '^#' | grep -v "MSSQL" | grep -e '^ADBC_' | awk NF | sed 's/"//g' | tee -a $GITHUB_ENV
+
+      # only postgresql
+      - name: Set environment variables
+        if: matrix.os == 'Windows' || matrix.os == 'macOS'
+        run: |
+          cat .env | grep -v -e '^#' | grep "POSTGRESQL" | grep -e '^ADBC_' | awk NF | sed 's/"//g' | tee -a $GITHUB_ENV
+
+      - name: Start Dependencies
+        if: matrix.os == 'Linux' && matrix.arch == 'amd64'
+        run: |
+          docker compose up --detach --wait flightsql-test flightsql-sqlite-test mssql-test postgres-test
+
+      - name: Start Dependencies
+        if: matrix.os == 'Linux' && matrix.arch == 'arm64v8'
+        run: |
+          docker compose up --detach --wait flightsql-test flightsql-sqlite-test postgres-test
+
+      # taking the approach from:
+      # https://github.com/ikalnytskyi/action-setup-postgres/blob/41a676a2118b02582251d839aa50cc5685355a2f/action.yml
+      - name: Install Dependencies
+        if: matrix.os == 'Windows'
+        env:
+          POSTGRESQL_VERSION: 18
+        run: |
+          choco install postgresql${POSTGRESQL_VERSION} \
+            --params "/Password:$ADBC_JDBC_POSTGRESQL_PASSWORD" \
+            --ia "--enable-components server,commandlinetools --extract-only 1" \
+            --no-progress
+
+          export PG_BINDIR=$("$PROGRAMFILES/PostgreSQL/${POSTGRESQL_VERSION}/bin/pg_config.exe" --bindir)
+          echo "$PG_BINDIR" | tee -a $GITHUB_PATH
+
+      - name: Install Dependencies
+        if: matrix.os == 'macOS'
+        env:
+          POSTGRESQL_VERSION: 18
+        run: |
+          export HOMEBREW_GITHUB_ACTIONS=1
+          export HOMEBREW_NO_ENV_HINTS=1
+          export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          export HOMEBREW_NO_INSTALL_UPGRADE=1
+          brew install --quiet postgresql@${POSTGRESQL_VERSION}
+          brew link --quiet --overwrite postgresql@${POSTGRESQL_VERSION}
+
+      - name: Start Dependencies
+        if: matrix.os == 'Windows' || matrix.os == 'macOS'
+        run: |
+          echo "$ADBC_JDBC_POSTGRESQL_PASSWORD" > "$RUNNER_TEMP/postgres_password"
+          initdb \
+            --pgdata="$RUNNER_TEMP/pgdata" \
+            --username "$ADBC_JDBC_POSTGRESQL_USER" \
+            --pwfile="$RUNNER_TEMP/postgres_password" \
+            --auth="scram-sha-256" \
+            --encoding="UTF-8" \
+            --locale="en_US.UTF-8" \
+            --no-instructions
+          pg_ctl start --pgdata="$RUNNER_TEMP/pgdata"
+
+      - name: Download thirdparty driver
+        if: matrix.os == 'Linux' && matrix.arch == 'amd64'
+        run: |
+          wget https://dbc-cdn.columnar.tech/mssql/v1.4.0/mssql_linux_amd64_v1.4.0.tar.gz
+          echo "89371ba78ffa8d5037d2a4d5331bc8f125598774e1da6e5b46b3af45a34e288b  mssql_linux_amd64_v1.4.0.tar.gz" > mssql_linux_amd64_v1.4.0.tar.gz.sha256
+          sha256sum -c mssql_linux_amd64_v1.4.0.tar.gz.sha256
+
+          tar xvf mssql_linux_amd64_v1.4.0.tar.gz
+          mkdir -p ~/.config/adbc/drivers/
+          mv libadbc_driver_mssql.so ~/.config/adbc/drivers/
+          echo "manifest_version = 1" > ~/.config/adbc/drivers/mssql.toml
+          echo "[Driver]" >> ~/.config/adbc/drivers/mssql.toml
+          echo "shared = '$HOME/.config/adbc/drivers/libadbc_driver_mssql.so'" >> ~/.config/adbc/drivers/mssql.toml
+          cat ~/.config/adbc/drivers/mssql.toml
+
+      - name: Test
+        run: |
           for driver in artifacts/*/driver; do
             export LD_LIBRARY_PATH=$(pwd)/$driver:${LD_LIBRARY_PATH:-}
             export DYLD_LIBRARY_PATH=$(pwd)/$driver:${DYLD_LIBRARY_PATH:-}
+            export PATH=$(pwd)/$driver:${PATH:-}
           done
-          env BUILD_JNI=ON ./ci/scripts/java_build.sh $(pwd)
+          echo LD_LIBRARY_PATH=$LD_LIBRARY_PATH
+          echo DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH
+          echo PATH=$PATH
           cd java
-          mvn -B -Pjni test -pl :adbc-driver-jni
+          mvn -B -Pjni test -pl :adbc-driver-jni -pl :adbc-driver-jni-validation

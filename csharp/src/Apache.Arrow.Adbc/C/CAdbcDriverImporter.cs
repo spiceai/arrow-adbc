@@ -79,31 +79,47 @@ namespace Apache.Arrow.Adbc.C
                 }
 
                 AdbcDriverInit init = Marshal.GetDelegateForFunctionPointer<AdbcDriverInit>(export);
-                CAdbcDriver driver = new CAdbcDriver();
-                int version;
-                using (CallHelper caller = new CallHelper())
-                {
-                    try
-                    {
-                        caller.Call(init, AdbcVersion.Version_1_1_0, ref driver);
-                        version = AdbcVersion.Version_1_1_0;
-                    }
-                    catch (AdbcException e) when (e.Status == AdbcStatusCode.NotImplemented)
-                    {
-                        caller.Call(init, AdbcVersion.Version_1_0_0, ref driver);
-                        version = AdbcVersion.Version_1_0_0;
-                    }
-
-                    ValidateDriver(ref driver, version);
-
-                    ImportedAdbcDriver result = new ImportedAdbcDriver(library, driver, version, canUnload);
-                    library = IntPtr.Zero;
-                    return result;
-                }
+                ImportedAdbcDriver result = LoadFromInit(init, library, canUnload);
+                library = IntPtr.Zero;
+                return result;
             }
             finally
             {
                 if (library != IntPtr.Zero && canUnload) { NativeLibrary.Free(library); }
+            }
+        }
+
+        /// <summary>
+        /// Loads an <see cref="AdbcDriver"/> from an in-process delegate that acts as the driver's
+        /// AdbcDriverInit entry point. Used for round-tripping <see cref="CAdbcDriverExporter"/>
+        /// through the importer in tests without producing a native library.
+        /// </summary>
+        internal static AdbcDriver Load(AdbcDriverInit init)
+        {
+            if (init == null) { throw new ArgumentNullException(nameof(init)); }
+            return LoadFromInit(init, IntPtr.Zero, canUnload: false);
+        }
+
+        private static ImportedAdbcDriver LoadFromInit(AdbcDriverInit init, IntPtr library, bool canUnload)
+        {
+            CAdbcDriver driver = new CAdbcDriver();
+            int version;
+            using (CallHelper caller = new CallHelper())
+            {
+                try
+                {
+                    caller.Call(init, AdbcVersion.Version_1_1_0, ref driver);
+                    version = AdbcVersion.Version_1_1_0;
+                }
+                catch (AdbcException e) when (e.Status == AdbcStatusCode.NotImplemented)
+                {
+                    caller.Call(init, AdbcVersion.Version_1_0_0, ref driver);
+                    version = AdbcVersion.Version_1_0_0;
+                }
+
+                ValidateDriver(ref driver, version);
+
+                return new ImportedAdbcDriver(library, driver, version, canUnload);
             }
         }
 
@@ -501,6 +517,15 @@ namespace Apache.Arrow.Adbc.C
                 }
             }
 
+            private unsafe ref CAdbcDriver Driver11
+            {
+                get
+                {
+                    if (_disposed) { throw new ObjectDisposedException(nameof(ImportedAdbcConnection)); }
+                    return ref _driver.Driver11;
+                }
+            }
+
             public override bool AutoCommit
             {
                 get => _autoCommit ?? throw AdbcException.NotImplemented("no value has been set for AutoCommit");
@@ -740,6 +765,14 @@ namespace Apache.Arrow.Adbc.C
                 using (CallHelper caller = new CallHelper())
                 {
                     caller.Call(Driver.ConnectionRollback, ref _nativeConnection);
+                }
+            }
+
+            public unsafe override void Cancel()
+            {
+                using (CallHelper caller = new CallHelper())
+                {
+                    caller.Call(Driver11.ConnectionCancel, ref _nativeConnection);
                 }
             }
 
@@ -1036,7 +1069,7 @@ namespace Apache.Arrow.Adbc.C
 #if NET5_0_OR_GREATER
                             Driver.StatementPrepare
 #else
-                            Marshal.GetDelegateForFunctionPointer<StatementPrepare>(Driver.StatementPrepare)
+                            Marshal.GetDelegateForFunctionPointer<StatementFn>(Driver.StatementPrepare)
 #endif
                             (statement, &caller._error));
                     }
@@ -1048,6 +1081,14 @@ namespace Apache.Arrow.Adbc.C
                 using (CallHelper caller = new CallHelper())
                 {
                     caller.Call(Driver.StatementSetOption, ref _nativeStatement, key, value);
+                }
+            }
+
+            public unsafe override void Cancel()
+            {
+                using (CallHelper caller = new CallHelper())
+                {
+                    caller.Call(Driver11.StatementCancel, ref _nativeStatement);
                 }
             }
 
@@ -1412,7 +1453,7 @@ namespace Apache.Arrow.Adbc.C
                 fixed (CAdbcStatement* stmt = &nativeStatement)
                 fixed (CAdbcError* e = &_error)
                 {
-                    TranslateCode(Marshal.GetDelegateForFunctionPointer<StatementPrepare>(fn)(stmt, e));
+                    TranslateCode(Marshal.GetDelegateForFunctionPointer<StatementFn>(fn)(stmt, e));
                 }
             }
 #endif

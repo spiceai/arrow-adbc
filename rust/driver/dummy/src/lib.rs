@@ -29,13 +29,15 @@ use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef, UnionFields};
 
 use adbc_core::{
-    constants,
+    Connection, Database, Driver, Optionable, PartitionedResult, Statement, constants,
     error::{Error, Result, Status},
     options::{
         InfoCode, ObjectDepth, OptionConnection, OptionDatabase, OptionStatement, OptionValue,
     },
-    schemas, Connection, Database, Driver, Optionable, PartitionedResult, Statement,
+    schemas,
 };
+
+pub const VENDOR_INFO_CODE: u32 = 10_042;
 
 #[derive(Debug)]
 pub struct SingleBatchReader {
@@ -312,9 +314,9 @@ impl Connection for DummyConnection {
 
     fn get_info(
         &self,
-        _codes: Option<HashSet<InfoCode>>,
+        codes: Option<HashSet<InfoCode>>,
     ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
-        let string_value_array = StringArray::from(vec!["MyVendorName"]);
+        let string_value_array = StringArray::from(vec!["MyVendorName", "MyVendorInfoValue"]);
         let bool_value_array = BooleanArray::from(vec![true]);
         let int64_value_array = Int64Array::from(vec![42]);
         let int32_bitmask_array = Int32Array::from(vec![1337]);
@@ -355,26 +357,38 @@ impl Connection for DummyConnection {
             false,
         )?;
 
-        let name_array = UInt32Array::from(vec![
-            Into::<u32>::into(&InfoCode::VendorName),
-            Into::<u32>::into(&InfoCode::VendorVersion),
-            Into::<u32>::into(&InfoCode::VendorArrowVersion),
-            Into::<u32>::into(&InfoCode::DriverName),
-            Into::<u32>::into(&InfoCode::DriverVersion),
-            Into::<u32>::into(&InfoCode::DriverArrowVersion),
-        ]);
+        // Every info value this driver knows, as (code, union type id, offset into that type's
+        // child array). Includes a vendor-specific code to exercise `InfoCode::Other`.
+        let known_info: [(InfoCode, i8, i32); 7] = [
+            (InfoCode::VendorName, 0, 0),
+            (InfoCode::VendorVersion, 1, 0),
+            (InfoCode::VendorArrowVersion, 2, 0),
+            (InfoCode::DriverName, 3, 0),
+            (InfoCode::DriverVersion, 4, 0),
+            (InfoCode::DriverArrowVersion, 5, 0),
+            (InfoCode::Other(VENDOR_INFO_CODE), 0, 1),
+        ];
+        let rows: Vec<&(InfoCode, i8, i32)> = known_info
+            .iter()
+            .filter(|(code, _, _)| codes.as_ref().is_none_or(|codes| codes.contains(code)))
+            .collect();
 
-        let type_id_buffer = [0_i8, 1, 2, 3, 4, 5]
-            .into_iter()
+        let name_array = UInt32Array::from(
+            rows.iter()
+                .map(|(code, _, _)| code.into())
+                .collect::<Vec<u32>>(),
+        );
+        let type_id_buffer = rows
+            .iter()
+            .map(|(_, type_id, _)| *type_id)
             .collect::<ScalarBuffer<i8>>();
-        let value_offsets_buffer = [0_i32, 0, 0, 0, 0, 0]
-            .into_iter()
+        let value_offsets_buffer = rows
+            .iter()
+            .map(|(_, _, offset)| *offset)
             .collect::<ScalarBuffer<i32>>();
 
         let value_array = UnionArray::try_new(
-            #[allow(deprecated)]
-            // TODO: remove this once update the minimum arrow version to 57.2.0
-            UnionFields::new(
+            UnionFields::try_new(
                 [0, 1, 2, 3, 4, 5],
                 [
                     Field::new("string_value", string_value_array.data_type().clone(), true),
@@ -392,7 +406,8 @@ impl Connection for DummyConnection {
                         true,
                     ),
                 ],
-            ),
+            )
+            .expect("must be valid"),
             type_id_buffer,
             Some(value_offsets_buffer),
             vec![
@@ -665,9 +680,7 @@ impl Connection for DummyConnection {
         let type_id_buffer = [1_i8].into_iter().collect::<ScalarBuffer<i8>>();
         let value_offsets_buffer = [0_i32].into_iter().collect::<ScalarBuffer<i32>>();
         let statistic_value_array = UnionArray::try_new(
-            #[allow(deprecated)]
-            // TODO: remove this once update the minimum arrow version to 57.2.0
-            UnionFields::new(
+            UnionFields::try_new(
                 [0, 1, 2, 3],
                 [
                     Field::new("int64", DataType::Int64, true),
@@ -675,7 +688,8 @@ impl Connection for DummyConnection {
                     Field::new("float64", DataType::Float64, true),
                     Field::new("binary", DataType::Binary, true),
                 ],
-            ),
+            )
+            .expect("must be valid"),
             type_id_buffer,
             Some(value_offsets_buffer),
             vec![

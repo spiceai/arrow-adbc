@@ -107,11 +107,12 @@ else
     rc|staging-rc|staging-release)
       suffix=${TYPE%-release}
       sed \
-        -i"" \
+        -e "s,^\\[apache-arrow-,[apache-adbc-,g" \
         -e "s,/almalinux/,/almalinux-${suffix}/,g" \
         -e "s,/centos/,/centos-${suffix}/,g" \
         -e "s,/amazon-linux/,/amazon-linux-${suffix}/,g" \
-        /etc/yum.repos.d/Apache-Arrow.repo
+        /etc/yum.repos.d/Apache-Arrow.repo > \
+        /etc/yum.repos.d/Apache-ADBC.repo
       ;;
   esac
 fi
@@ -151,10 +152,6 @@ echo "::endgroup::"
 
 echo "::group::Test ADBC Flight SQL Driver"
 ${install_command} --enablerepo=epel adbc-driver-flightsql-devel-${package_version}
-echo "::endgroup::"
-
-echo "::group::Test ADBC Snowflake Driver"
-${install_command} --enablerepo=epel adbc-driver-snowflake-devel-${package_version}
 echo "::endgroup::"
 
 echo "::group::Test ADBC GLib"

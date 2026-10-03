@@ -264,6 +264,31 @@ const (
 	OptionKeyPassword                 = "password"
 	// EXPERIMENTAL. Sets/Gets the trace parent on OpenTelemetry traces
 	OptionKeyTelemetryTraceParent = "adbc.telemetry.trace_parent"
+	// EXPERIMENTAL. Selects the OpenTelemetry traces exporter when the
+	// driver initializes its tracer provider. Accepts the same values as
+	// the OpenTelemetry "OTEL_TRACES_EXPORTER" environment variable (see
+	// the OptionTelemetryExporter constants below: "none", "otlp",
+	// "console", "adbcfile"). When this option is set on a database it
+	// takes precedence over the OTEL_TRACES_EXPORTER environment
+	// variable, which lets operators select an exporter via the ADBC
+	// driver manager / TOML profile mechanism without having to mutate
+	// the host process's environment. When neither this option nor the
+	// environment variable is set, the driver falls back to the
+	// process-global OpenTelemetry tracer provider.
+	OptionKeyTelemetryTracesExporter = "adbc.telemetry.traces_exporter"
+	// EXPERIMENTAL. Selects the on-disk folder used by the "adbcfile"
+	// traces exporter. When the exporter is "adbcfile" and this option
+	// is set, rotated trace files are written to the supplied folder
+	// (which is created if it does not exist) instead of the default
+	// platform-specific ADBC traces path (for example,
+	// "<user-config-dir>/ADBC/Traces" on macOS,
+	// "<local-app-data-dir>/ADBC/Traces" on Windows, or
+	// "<xdg-state-dir>/adbc/traces" on Linux). The option is ignored for
+	// other exporters; it exists so an operator can route trace files
+	// to a location their support workflow already collects (e.g. a
+	// shared diagnostics folder) via the ADBC driver-manager / TOML
+	// profile mechanism.
+	OptionKeyTelemetryTracesFolderPath = "adbc.telemetry.traces_folder_path"
 )
 
 // EXPERIMENTAL. Traces Telemetry exporter option type
@@ -737,19 +762,23 @@ type Statement interface {
 	// executed repeatedly, Prepare should be called first on the statement.
 	SetSubstraitPlan(plan []byte) error
 
-	// Bind uses an arrow record batch to bind parameters to the query.
+	// Bind uses an Arrow record batch to bind parameters to the query.
 	//
-	// This can be used for bulk inserts or for prepared statements.
-	// The driver will call release on the passed in Record when it is done,
-	// but it may not do this until the statement is closed or another
-	// record is bound.
+	// This can be used for bulk inserts or for prepared statements.  The
+	// driver will Retain the given batch; the application must still
+	// Release the batch after binding. The driver will Release the batch
+	// after processing, but this may not be until Close is called. A nil
+	// batch will unbind values.
 	Bind(ctx context.Context, values arrow.RecordBatch) error
 
 	// BindStream uses a record batch stream to bind parameters for this
 	// query. This can be used for bulk inserts or prepared statements.
 	//
-	// The driver will call Release on the record reader, but may not do this
-	// until Close is called.
+	// This can be used for bulk inserts or for prepared statements.  The
+	// driver will Retain the given reader; the application must still
+	// Release the reader after binding. The driver will Release the
+	// reader after processing, but this may not be until Close is
+	// called. A nil reader will unbind values.
 	BindStream(ctx context.Context, stream array.RecordReader) error
 
 	// GetParameterSchema returns an Arrow schema representation of

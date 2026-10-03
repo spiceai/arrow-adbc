@@ -57,7 +57,7 @@ jobs:
     name: "DuckDB Integration Tests"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -66,11 +66,11 @@ jobs:
         run: |
           echo "today=$(/bin/date -u '+%Y%m%d')" >> $GITHUB_OUTPUT
       - name: Cache Conda
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167  # v3.3.0
+      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -104,7 +104,7 @@ jobs:
     name: "FlightSQL Integration Tests (Dremio, SQLite, and GizmoSQL)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -116,11 +116,11 @@ jobs:
         run: |
           echo "today=$(/bin/date -u '+%Y%m%d')" >> $GITHUB_OUTPUT
       - name: Cache Conda
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167  # v3.3.0
+      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -131,7 +131,7 @@ jobs:
             --file ci/conda_env_cpp.txt \
             --file ci/conda_env_python.txt
           pip install pytest-error-for-skips
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "${{ env.GO_VERSION }}"
           check-latest: true
@@ -181,7 +181,7 @@ jobs:
           # Preinstalled tools use a lot of disk space, free up some space
           # https://github.com/actions/runner-images/issues/2840
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -190,11 +190,11 @@ jobs:
         run: |
           echo "today=$(/bin/date -u '+%Y%m%d')" >> $GITHUB_OUTPUT
       - name: Cache Conda
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167  # v3.3.0
+      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -278,82 +278,25 @@ jobs:
           ./ci/scripts/python_test.sh "$(pwd)" "$(pwd)/build"
           docker compose down
           docker compose rm -fsv
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Run PostgreSQL Validation Suite
         run: |
           env POSTGRES_VERSION=18 docker compose up --wait --detach postgres-test
           env BUILD_ALL=0 BUILD_DRIVER_POSTGRESQL=1 uv --project=./c/driver/postgresql/validation/ run ci/scripts/validate.sh $(pwd)
           docker compose down
 
-  snowflake:
-    name: "Snowflake Integration Tests"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Get required Go version
-        run: |
-          (. .env && echo "GO_VERSION=${GO}") >> $GITHUB_ENV
-      - name: Get Date
-        id: get-date
-        run: |
-          echo "today=$(/bin/date -u '+%Y%m%d')" >> $GITHUB_OUTPUT
-      - name: Cache Conda
-        uses: actions/cache/restore@v5
-        with:
-          path: ~/conda_pkgs_dir
-          key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167  # v3.3.0
-        with:
-          miniforge-version: latest
-          use-only-tar-bz2: false
-          use-mamba: true
-      - name: Install Dependencies
-        run: |
-          ./ci/scripts/remamba.sh install -c conda-forge \
-            --file ci/conda_env_cpp.txt \
-            --file ci/conda_env_python.txt
-      - name: Work around ASAN issue (GH-1617)
-        run: |
-          sudo sysctl vm.mmap_rnd_bits=28
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "${{ env.GO_VERSION }}"
-          check-latest: true
-          cache: true
-          cache-dependency-path: go/adbc/go.sum
-      - name: Build and Test Snowflake Driver
-        env:
-          BUILD_ALL: "0"
-          BUILD_DRIVER_SNOWFLAKE: "1"
-          ADBC_SNOWFLAKE_URI: ${{ secrets.SNOWFLAKE_URI }}
-        run: |
-          ./ci/scripts/cpp_build.sh "$(pwd)" "$(pwd)/build"
-          ./ci/scripts/cpp_test.sh "$(pwd)/build"
-      - name: Build and Test Snowflake Driver (Python)
-        env:
-          BUILD_ALL: "0"
-          BUILD_DRIVER_MANAGER: "1"
-          BUILD_DRIVER_SNOWFLAKE: "1"
-          ADBC_SNOWFLAKE_URI: ${{ secrets.SNOWFLAKE_URI }}
-        run: |
-          ./ci/scripts/python_build.sh "$(pwd)" "$(pwd)/build"
-          env BUILD_DRIVER_MANAGER=0 ./ci/scripts/python_test.sh "$(pwd)" "$(pwd)/build"
-
   flightsql_interop:
     name: "FlightSQL C# Interop"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Get required Go version
         run: |
           (. .env && echo "GO_VERSION=${GO}") >> $GITHUB_ENV
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "${{ env.GO_VERSION }}"
           check-latest: true

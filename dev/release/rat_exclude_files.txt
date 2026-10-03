@@ -4,6 +4,7 @@
 *.Rd
 .codespell-dictionary
 .codespell-ignore
+c/driver/postgresql/testdata/numeric_roundtrip_fixtures.csv
 c/driver/postgresql/validation/queries/**/*.sql
 c/subprojects/fmt.wrap
 c/subprojects/gtest.wrap
@@ -16,6 +17,7 @@ c/vendor/sqlite3/sqlite3.h
 c/vendor/portable-snippets/include/portable-snippets/safe-math.h
 ci/conda/.ci_support/*
 ci/conda/.gitattributes
+ci/licenses/*
 ci/linux-packages/changelog
 ci/linux-packages/*.install
 csharp/*.sln
@@ -24,6 +26,7 @@ csharp/*.props
 dev/release/rat_exclude_files.txt
 docs/source/format/*.drawio
 docs/source/format/*.svg
+docs/source/_static/*.svg
 docs/source/*/*.stdout.txt
 filtered_rat.txt
 go/adbc/drivermgr/arrow-adbc/adbc.h
