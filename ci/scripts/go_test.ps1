@@ -22,14 +22,18 @@ $BuildDir = $Args[1]
 $InstallDir = if ($Args[2] -ne $null) { $Args[2] } else { Join-Path $BuildDir "local/" }
 
 if ($env:CGO_ENABLED -eq "1") {
-    $env:PATH += "$($InstallDir)\bin"
+    $env:PATH = "$($InstallDir)\bin;$env:PATH"
 }
 
 $GoDir = Join-Path $SourceDir "go" "adbc"
+$DriverDir = Join-Path $SourceDir "go" "driver"
 
 Push-Location $GoDir
-
 go test -v ./...
 if (-not $?) { exit 1 }
+Pop-Location
 
+Push-Location $DriverDir
+go test -v ./...
+if (-not $?) { exit 1 }
 Pop-Location

@@ -20,11 +20,47 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <libpq-fe.h>
 #include <nanoarrow/nanoarrow.hpp>
 
+#include "database.h"
 #include "postgres_type.h"
+#include "type_resolver_init.h"
 
 namespace adbcpq {
+
+TEST(PostgresTypeTest, NumericTypeModifier) {
+  for (const int32_t typmod : {-1, 1900557, 329729, 131080}) {
+    SCOPED_TRACE(typmod);
+    nanoarrow::UniqueSchema schema;
+    ArrowSchemaInit(schema.get());
+    ASSERT_EQ(PostgresType(PostgresTypeId::kNumeric)
+                  .WithTypeModifier(typmod)
+                  .WithFieldName("amount")
+                  .SetSchema(schema.get()),
+              NANOARROW_OK);
+    EXPECT_STREQ(schema->format, "u");
+    EXPECT_STREQ(schema->name, "amount");
+    ArrowStringView value = ArrowCharView("");
+    ASSERT_EQ(ArrowMetadataGetValue(schema->metadata, ArrowCharView("POSTGRESQL:typmod"),
+                                    &value),
+              NANOARROW_OK);
+    EXPECT_EQ(std::string(value.data, value.size_bytes), std::to_string(typmod));
+    ASSERT_EQ(ArrowMetadataGetValue(schema->metadata,
+                                    ArrowCharView("ARROW:extension:name"), &value),
+              NANOARROW_OK);
+    EXPECT_EQ(std::string(value.data, value.size_bytes), "arrow.opaque");
+  }
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(PostgresType(PostgresTypeId::kNumeric).SetSchema(schema.get()), NANOARROW_OK);
+  ArrowStringView value = {nullptr, 0};
+  ASSERT_EQ(
+      ArrowMetadataGetValue(schema->metadata, ArrowCharView("POSTGRESQL:typmod"), &value),
+      NANOARROW_OK);
+  EXPECT_EQ(value.data, nullptr);
+}
 
 class MockTypeResolver : public PostgresTypeResolver {
  public:
@@ -199,10 +235,30 @@ TEST(PostgresTypeTest, PostgresTypeSetSchema) {
   schema.reset();
 
   ArrowSchemaInit(schema.get());
+  EXPECT_EQ(PostgresType(PostgresTypeId::kUuid).SetSchema(schema.get()), NANOARROW_OK);
+  EXPECT_STREQ(schema->format, "w:16");
+  typnameMetadataValue = ArrowCharView("<not found>");
+  ArrowMetadataGetValue(schema->metadata, ArrowCharView("ARROW:extension:name"),
+                        &typnameMetadataValue);
+  EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
+            "arrow.uuid");
+  typnameMetadataValue = ArrowCharView("<not found>");
+  ArrowMetadataGetValue(schema->metadata, ArrowCharView("ARROW:extension:metadata"),
+                        &typnameMetadataValue);
+  EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
+            "<not found>");
+  schema.reset();
+
+  ArrowSchemaInit(schema.get());
   EXPECT_EQ(PostgresType(PostgresTypeId::kNumeric).SetSchema(schema.get()), NANOARROW_OK);
   EXPECT_STREQ(schema->format, "u");
   typnameMetadataValue = ArrowCharView("<not found>");
   ArrowMetadataGetValue(schema->metadata, ArrowCharView("ADBC:postgresql:typname"),
+                        &typnameMetadataValue);
+  EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
+            "numeric");
+  typnameMetadataValue = ArrowCharView("<not found>");
+  ArrowMetadataGetValue(schema->metadata, ArrowCharView("POSTGRESQL:type"),
                         &typnameMetadataValue);
   EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
             "numeric");
@@ -224,6 +280,11 @@ TEST(PostgresTypeTest, PostgresTypeSetSchema) {
   typnameMetadataValue = ArrowCharView("<not found>");
   ArrowMetadataGetValue(schema->children[0]->metadata,
                         ArrowCharView("ADBC:postgresql:typname"), &typnameMetadataValue);
+  EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
+            "numeric");
+  typnameMetadataValue = ArrowCharView("<not found>");
+  ArrowMetadataGetValue(schema->children[0]->metadata, ArrowCharView("POSTGRESQL:type"),
+                        &typnameMetadataValue);
   EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
             "numeric");
   schema.reset();
@@ -249,6 +310,11 @@ TEST(PostgresTypeTest, PostgresTypeSetSchema) {
   EXPECT_STREQ(schema->format, "z");
   typnameMetadataValue = ArrowCharView("<not found>");
   ArrowMetadataGetValue(schema->metadata, ArrowCharView("ADBC:postgresql:typname"),
+                        &typnameMetadataValue);
+  EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
+            "some_name");
+  typnameMetadataValue = ArrowCharView("<not found>");
+  ArrowMetadataGetValue(schema->metadata, ArrowCharView("POSTGRESQL:type"),
                         &typnameMetadataValue);
   EXPECT_EQ(std::string(typnameMetadataValue.data, typnameMetadataValue.size_bytes),
             "some_name");
@@ -374,6 +440,26 @@ TEST(PostgresTypeTest, PostgresTypeFromSchema) {
             NANOARROW_OK);
   EXPECT_EQ(PostgresType::FromSchema(resolver, schema.get(), &type, &error), ENOTSUP);
   EXPECT_STREQ(error.message, "Can't map Arrow type 'interval_months' to Postgres type");
+  schema.reset();
+
+  // A canonical arrow.uuid field (FixedSizeBinary(16) storage) resolves to uuid
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(
+      ArrowSchemaSetTypeFixedSize(schema.get(), NANOARROW_TYPE_FIXED_SIZE_BINARY, 16),
+      NANOARROW_OK);
+  {
+    nanoarrow::UniqueBuffer buffer;
+    ASSERT_EQ(ArrowMetadataBuilderInit(buffer.get(), nullptr), NANOARROW_OK);
+    ASSERT_EQ(
+        ArrowMetadataBuilderAppend(buffer.get(), ArrowCharView("ARROW:extension:name"),
+                                   ArrowCharView("arrow.uuid")),
+        NANOARROW_OK);
+    ASSERT_EQ(ArrowSchemaSetMetadata(schema.get(), reinterpret_cast<char*>(buffer->data)),
+              NANOARROW_OK);
+  }
+  EXPECT_EQ(PostgresType::FromSchema(resolver, schema.get(), &type, nullptr),
+            NANOARROW_OK);
+  EXPECT_EQ(type.type_id(), PostgresTypeId::kUuid);
   schema.reset();
 }
 
@@ -501,6 +587,43 @@ TEST(PostgresTypeTest, PostgresTypeResolveInt2vector) {
   EXPECT_EQ(type.typname(), "int2vector");
   EXPECT_EQ(type.type_id(), PostgresTypeId::kInt2vector);
   EXPECT_EQ(0, type.n_children());
+}
+
+TEST(PostgresTypeTest, BuiltinResolver) {
+  const char* uri = std::getenv("ADBC_POSTGRESQL_TEST_URI");
+  if (!uri) {
+    FAIL() << "Must provide env var ADBC_POSTGRESQL_TEST_URI";
+  }
+
+  auto* conn = PQconnectdb(uri);
+  if (auto status = PQstatus(conn); status != CONNECTION_OK) {
+    std::string message = PQerrorMessage(conn);
+    PQfinish(conn);
+    ASSERT_EQ(CONNECTION_OK, status) << message;
+  }
+
+  PostgresTypeResolver builtin, dynamic;
+  ASSERT_TRUE(InternalAdbcInitializeTypeResolver(builtin).ok());
+  ASSERT_TRUE(InternalAdbcRebuildTypeResolver(conn, dynamic).ok());
+
+  PQfinish(conn);
+
+  for (const auto& [oid, type] : builtin.oid_mapping()) {
+    // types from PostgreSQL 19 - ignore them
+    if (oid == 6437) continue;  // oid8
+    if (oid == 6442) continue;  // oid8 array
+    if (oid == 6490) continue;  // regdatabase
+    if (oid == 6491) continue;  // regdatabase array
+
+    SCOPED_TRACE("oid = " + std::to_string(oid));
+    auto dynamic_type = dynamic.oid_mapping().find(oid);
+    EXPECT_NE(dynamic_type, dynamic.oid_mapping().end());
+    if (dynamic_type == dynamic.oid_mapping().end()) {
+      continue;
+    }
+    EXPECT_EQ(type.type_id(), dynamic_type->second.type_id());
+    EXPECT_EQ(type.typname(), dynamic_type->second.typname());
+  }
 }
 
 }  // namespace adbcpq

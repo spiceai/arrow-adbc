@@ -15,10 +15,22 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import contextlib
+import os
 import re
+import typing
 from pathlib import Path
 
 from adbc_drivers_validation import model, quirks
+
+import adbc_driver_manager.dbapi
+
+_database_args = {
+    "uri": model.FromEnv("ADBC_POSTGRESQL_TEST_URI"),
+    "adbc.postgresql.type_resolver_mode": os.environ.get(
+        "POSTGRES_TYPE_RESOLVER_MODE", "server"
+    ),
+}
 
 
 class PostgreSQLQuirks(model.DriverQuirks):
@@ -35,10 +47,12 @@ class PostgreSQLQuirks(model.DriverQuirks):
         get_objects_constraints_foreign=False,
         get_objects_constraints_primary=False,
         get_objects_constraints_unique=False,
+        metadata_type_name=True,
         statement_bulk_ingest=True,
         statement_bulk_ingest_catalog=False,
         statement_bulk_ingest_schema=False,
-        statement_bulk_ingest_temporary=False,
+        statement_bulk_ingest_temporary=True,
+        statement_bind=True,
         statement_execute_schema=True,
         statement_get_parameter_schema=True,
         statement_prepare=True,
@@ -46,18 +60,17 @@ class PostgreSQLQuirks(model.DriverQuirks):
         statement_rows_affected_ddl=False,
         current_catalog="postgres",
         current_schema="public",
+        secondary_schema="secondary",
         supported_xdbc_fields=["xdbc_type_name"],
     )
     setup = model.DriverSetup(
-        database={
-            "uri": model.FromEnv("ADBC_POSTGRESQL_TEST_URI"),
-        },
+        database=_database_args,
         connection={},
         statement={},
     )
 
     @property
-    def queries_paths(self) -> tuple[Path]:
+    def queries_paths(self) -> tuple[Path, ...]:
         return (Path(__file__).parent.parent / "queries",)
 
     def bind_parameter(self, index: int) -> str:
@@ -81,6 +94,18 @@ class PostgreSQLQuirks(model.DriverQuirks):
             or ("undefined_table" in error_str and table_name.lower() in error_str)
         )
 
+    def qualify_temp_table(
+        self, cursor: adbc_driver_manager.dbapi.Cursor, name: str
+    ) -> list[str]:
+        cursor.execute(
+            "SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()"
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Could not determine temporary schema")
+        (schema,) = row
+        return [self.features.current_catalog, schema, name]
+
     def quote_one_identifier(self, identifier: str) -> str:
         """Quote an identifier using PostgreSQL's double-quote syntax."""
         identifier = identifier.replace('"', '""')
@@ -91,4 +116,178 @@ class PostgreSQLQuirks(model.DriverQuirks):
         return quirks.split_statement(statement)
 
 
-QUIRKS = [PostgreSQLQuirks()]
+class CedarDBQuirks(PostgreSQLQuirks):
+    name = "cedardb"
+    vendor_version = re.compile(r"16[0-9]{4}")
+    short_version = "16"
+    setup = model.DriverSetup(
+        database=_database_args,
+        connection={},
+        statement={"adbc.postgresql.use_copy": "false"},
+    )
+
+    @property
+    def field_metadata_prefix(self) -> str:
+        return "POSTGRESQL"
+
+    @property
+    def queries_paths(self) -> tuple[Path, ...]:
+        return (
+            *super().queries_paths,
+            Path(__file__).parent.parent / "queries-cedardb",
+        )
+
+
+class CitusQuirks(PostgreSQLQuirks):
+    vendor_name = "PostgreSQL"
+    vendor_version = re.compile(r"17[0-9]{4}")
+    short_version = "17"
+
+
+class CockroachDBQuirks(PostgreSQLQuirks):
+    vendor_version = re.compile(r"13[0-9]{4}")
+    short_version = "13"
+    features = PostgreSQLQuirks.features.model_copy(
+        update={"connection_get_table_schema": False}
+    )
+    setup = model.DriverSetup(
+        database=_database_args,
+        connection={},
+        statement={"adbc.postgresql.use_copy": "false"},
+    )
+
+    @property
+    def queries_paths(self) -> tuple[Path, ...]:
+        return (
+            *super().queries_paths,
+            Path(__file__).parent.parent / "queries-cockroachdb",
+        )
+
+
+class CrateDBQuirks(PostgreSQLQuirks):
+    vendor_version = re.compile(r"14[0-9]{4}")
+    short_version = "14"
+    features = PostgreSQLQuirks.features.with_values(
+        connection_get_table_schema=False,
+        connection_transactions=False,
+        current_catalog="crate",
+        current_schema="doc",
+        get_objects=False,
+        statement_bulk_ingest=False,
+    )
+    setup = model.DriverSetup(
+        database=_database_args,
+        connection={},
+        statement={"adbc.postgresql.use_copy": "false"},
+    )
+
+    def query_override(self, context: str, default: str) -> str:
+        if context == "TestStatement.sample_table":
+            # Make this a primary key so changes are immediately visible
+            # https://cratedb.com/docs/crate/reference/en/latest/sql/statements/refresh.html
+            return (
+                f"CREATE TABLE {self.quote_identifier('sample_table')} "
+                "(id INT PRIMARY KEY, value VARCHAR)"
+            )
+        return super().query_override(context, default)
+
+    @property
+    def queries_paths(self) -> tuple[Path, ...]:
+        extra_paths: tuple[Path, ...] = ()
+        if os.environ.get("POSTGRES_TYPE_RESOLVER_MODE") != "builtin":
+            extra_paths = (
+                Path(__file__).parent.parent / "queries-cratedb-typeresolver",
+            )
+        return (
+            *super().queries_paths,
+            Path(__file__).parent.parent / "queries-cratedb",
+            *extra_paths,
+        )
+
+    @contextlib.contextmanager
+    def setup_statement(
+        self,
+        query: model.Query | str,
+        cursor: adbc_driver_manager.dbapi.Cursor,
+    ) -> typing.Generator[None, None, None]:
+        with super().setup_statement(query, cursor):
+            if isinstance(query, model.Query):
+                if table_name := query.metadata().setup.drop:
+                    cursor.adbc_statement.set_sql_query(
+                        f"REFRESH TABLE {self.quote_identifier(table_name)}"
+                    )
+                    cursor.adbc_statement.execute_update()
+            yield
+
+
+class MaterializeQuirks(PostgreSQLQuirks):
+    vendor_version = re.compile(r"905[0-9]{2}")
+    short_version = "9.5"
+    features = PostgreSQLQuirks.features.with_values(
+        # Materialize cannot decode the driver's text parameter as regclass.
+        connection_get_table_schema=False,
+        current_catalog="materialize",
+        # The table metadata query fails with "function unnest(text) does not exist".
+        get_objects=False,
+        # COPY FROM only supports TEXT and CSV, while ingestion uses binary COPY.
+        # https://materialize.com/docs/sql/copy-from/
+        statement_bulk_ingest=False,
+    )
+
+    @property
+    def queries_paths(self) -> tuple[Path, ...]:
+        return (
+            *super().queries_paths,
+            Path(__file__).parent.parent / "queries-materialize",
+        )
+
+
+class ParadeDBQuirks(PostgreSQLQuirks):
+    pass
+
+
+class TimescaleDBQuirks(PostgreSQLQuirks):
+    pass
+
+
+class YugabyteDBQuirks(PostgreSQLQuirks):
+    vendor_version = re.compile(r"15[0-9]{4}")
+    short_version = "15"
+    features = PostgreSQLQuirks.features.with_values(current_catalog="yugabyte")
+
+
+class AlloyDBOmniQuirks(PostgreSQLQuirks):
+    vendor_version = re.compile(r"17[0-9]{4}")
+    short_version = "17"
+
+
+VENDORS = (
+    "postgresql",
+    "alloydb-omni",
+    "cedardb",
+    "citus",
+    "cockroachdb",
+    "cratedb",
+    "materialize",
+    "paradedb",
+    "timescaledb",
+    "yugabytedb",
+)
+
+_QUIRKS = {
+    "postgresql": PostgreSQLQuirks,
+    "alloydb-omni": AlloyDBOmniQuirks,
+    "cedardb": CedarDBQuirks,
+    "citus": CitusQuirks,
+    "cockroachdb": CockroachDBQuirks,
+    "cratedb": CrateDBQuirks,
+    "materialize": MaterializeQuirks,
+    "paradedb": ParadeDBQuirks,
+    "timescaledb": TimescaleDBQuirks,
+    "yugabytedb": YugabyteDBQuirks,
+}
+
+
+def get_quirks(vendor: str) -> PostgreSQLQuirks:
+    """Get the PostgreSQL-compatible quirks for one vendor."""
+    return _QUIRKS[vendor]()

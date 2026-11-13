@@ -26,9 +26,8 @@
 #include <variant>
 #include <vector>
 
-#if defined(ADBC_FRAMEWORK_USE_FMT)
 #include <fmt/core.h>
-#endif
+#include <fmt/format.h>
 
 #include <arrow-adbc/adbc.h>
 
@@ -82,6 +81,8 @@ class Status {
     }
   }
 
+  std::string message() const { return impl_ ? impl_->message : ""; }
+
   /// \brief Export this status to an AdbcError.
   AdbcStatusCode ToAdbc(AdbcError* adbc_error) const {
     if (impl_ == nullptr) return ADBC_STATUS_OK;
@@ -128,12 +129,12 @@ class Status {
   // Helpers to create statuses with known codes
   static Status Ok() { return Status(); }
 
-#define STATUS_CTOR(NAME, CODE)                  \
-  template <typename... Args>                    \
-  static Status NAME(Args&&... args) {           \
-    std::stringstream ss;                        \
-    ([&] { ss << args; }(), ...);                \
-    return Status(ADBC_STATUS_##CODE, ss.str()); \
+#define STATUS_CTOR(NAME, CODE)                         \
+  template <typename... Args>                           \
+  [[maybe_unused]] static Status NAME(Args&&... args) { \
+    std::stringstream ss;                               \
+    ([&] { ss << args; }(), ...);                       \
+    return Status(ADBC_STATUS_##CODE, ss.str());        \
   }
 
   STATUS_CTOR(Internal, INTERNAL)
@@ -304,12 +305,12 @@ namespace adbc::driver::status {
 
 inline driver::Status Ok() { return driver::Status(); }
 
-#define STATUS_CTOR(NAME, CODE)                  \
-  template <typename... Args>                    \
-  static Status NAME(Args&&... args) {           \
-    std::stringstream ss;                        \
-    ([&] { ss << args; }(), ...);                \
-    return Status(ADBC_STATUS_##CODE, ss.str()); \
+#define STATUS_CTOR(NAME, CODE)                         \
+  template <typename... Args>                           \
+  [[maybe_unused]] static Status NAME(Args&&... args) { \
+    std::stringstream ss;                               \
+    ([&] { ss << args; }(), ...);                       \
+    return Status(ADBC_STATUS_##CODE, ss.str());        \
   }
 
 // TODO: unit tests for internal utilities
@@ -325,14 +326,13 @@ STATUS_CTOR(Unknown, UNKNOWN)
 
 }  // namespace adbc::driver::status
 
-#if defined(ADBC_FRAMEWORK_USE_FMT)
 namespace adbc::driver::status::fmt {
 
-#define STATUS_CTOR(NAME, CODE)                                                     \
-  template <typename... Args>                                                       \
-  static Status NAME(std::string_view format_string, Args&&... args) {              \
-    auto message = ::fmt::vformat(format_string, ::fmt::make_format_args(args...)); \
-    return Status(ADBC_STATUS_##CODE, std::move(message));                          \
+#define STATUS_CTOR(NAME, CODE)                                                         \
+  template <typename... Args>                                                           \
+  [[maybe_unused]] static Status NAME(std::string_view format_string, Args&&... args) { \
+    auto message = ::fmt::vformat(format_string, ::fmt::make_format_args(args...));     \
+    return Status(ADBC_STATUS_##CODE, std::move(message));                              \
   }
 
 // TODO: unit tests for internal utilities
@@ -340,6 +340,7 @@ STATUS_CTOR(Internal, INTERNAL)
 STATUS_CTOR(InvalidArgument, INVALID_ARGUMENT)
 STATUS_CTOR(InvalidState, INVALID_STATE)
 STATUS_CTOR(IO, IO)
+STATUS_CTOR(Integrity, INTEGRITY)
 STATUS_CTOR(NotFound, NOT_FOUND)
 STATUS_CTOR(NotImplemented, NOT_IMPLEMENTED)
 STATUS_CTOR(Unknown, UNKNOWN)
@@ -347,7 +348,6 @@ STATUS_CTOR(Unknown, UNKNOWN)
 #undef STATUS_CTOR
 
 }  // namespace adbc::driver::status::fmt
-#endif
 
 #define UNWRAP_ERRNO_IMPL(NAME, CODE, RHS)                                               \
   do {                                                                                   \

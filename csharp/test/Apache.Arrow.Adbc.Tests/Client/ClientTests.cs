@@ -16,8 +16,10 @@
 */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Data.Common;
 using System.Data.SqlTypes;
 using System.Linq;
 using System.Threading;
@@ -94,6 +96,20 @@ namespace Apache.Arrow.Adbc.Tests.Client
                         Assert.True(rdrValue.GetType().Equals(typeof(int)));
                 }
             }
+        }
+
+        [Fact]
+        public void TestIsDBNull()
+        {
+            AdbcDataReader rdr = GetMoqDataReaderForIntegers();
+
+            List<bool> isNull = new List<bool>();
+            while (rdr.Read())
+            {
+                isNull.Add(rdr.IsDBNull(0));
+            }
+
+            Assert.Equal(new[] { false, false, false, true, false }, isNull);
         }
 
         private AdbcDataReader GetMoqDataReader(DecimalBehavior decimalBehavior, string value, int precision, int scale)
@@ -229,6 +245,222 @@ namespace Apache.Arrow.Adbc.Tests.Client
                 Assert.Null(cmd.AdbcCommandTimeoutProperty);
             }
         }
+
+        [Fact]
+        public void ReadAsyncDoesNotDeadlockOnASynchronizationContext()
+        {
+            const int timeoutMilliseconds = 30_000; // generous for loaded CI runners; a real deadlock never completes
+            const int expectedRows = 4;
+
+            using ManualResetEventSlim finished = new ManualResetEventSlim(false);
+            int rows = 0;
+            Exception? failure = null;
+
+            Thread thread = new Thread(() =>
+            {
+                PumpingSynchronizationContext context = new PumpingSynchronizationContext();
+                SynchronizationContext.SetSynchronizationContext(context);
+
+                context.Post(async _ =>
+                {
+                    try
+                    {
+                        // syncOnlyDriver: a regressed build must reach ReadAsync, not throw earlier.
+                        AsyncReaderFixture fixture = AsyncReaderFixture.Create(
+                            batchCount: 2,
+                            rowsPerBatch: 2,
+                            syncOnlyDriver: true);
+
+                        using (DbDataReader reader = await fixture.Command.ExecuteReaderAsync())
+                        {
+                            while (await reader.ReadAsync())
+                            {
+                                rows++;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failure = ex;
+                    }
+
+                    finished.Set();
+                    context.Complete();
+                }, null);
+
+                context.Pump();
+            });
+
+            thread.IsBackground = true;
+            thread.Start();
+
+            Assert.True(finished.Wait(timeoutMilliseconds), "ReadAsync deadlocked on a SynchronizationContext");
+            Assert.Null(failure);
+            Assert.Equal(expectedRows, rows);
+        }
+
+        [Fact]
+        public async Task ExecuteReaderAsyncUsesTheAsyncStatementPath()
+        {
+            AsyncReaderFixture fixture = AsyncReaderFixture.Create(batchCount: 1, rowsPerBatch: 1);
+
+            using (DbDataReader reader = await fixture.Command.ExecuteReaderAsync())
+            {
+            }
+
+            fixture.Statement.Verify(x => x.ExecuteQueryAsync(It.IsAny<CancellationToken>()), Times.Once);
+            fixture.Statement.Verify(x => x.ExecuteQuery(), Times.Never);
+        }
+
+        [Fact]
+        public async Task ExecuteReaderAsyncPassesTheCancellationTokenToTheStatement()
+        {
+            AsyncReaderFixture fixture = AsyncReaderFixture.Create(batchCount: 1, rowsPerBatch: 1);
+
+            using CancellationTokenSource cts = new CancellationTokenSource();
+            using (DbDataReader reader = await fixture.Command.ExecuteReaderAsync(cts.Token))
+            {
+            }
+
+            fixture.Statement.Verify(x => x.ExecuteQueryAsync(cts.Token), Times.Once);
+        }
+
+        [Fact]
+        public async Task ExecuteNonQueryAsyncUsesTheAsyncStatementPath()
+        {
+            Mock<AdbcStatement> mockStatement = new Mock<AdbcStatement>();
+            mockStatement
+                .Setup(x => x.ExecuteUpdateAsync(It.IsAny<CancellationToken>()))
+                .Returns(Task.FromResult(new UpdateResult(7)));
+
+            AdbcCommand command = new AdbcCommand(mockStatement.Object, new AdbcClient.AdbcConnection());
+
+            using CancellationTokenSource cts = new CancellationTokenSource();
+            Assert.Equal(7, await command.ExecuteNonQueryAsync(cts.Token));
+
+            mockStatement.Verify(x => x.ExecuteUpdateAsync(cts.Token), Times.Once);
+            mockStatement.Verify(x => x.ExecuteUpdate(), Times.Never);
+        }
+
+        [Fact]
+        public async Task ExecuteNonQueryAsyncFallsBackToSyncExecuteUpdate()
+        {
+            Mock<AdbcStatement> mockStatement = new Mock<AdbcStatement>() { CallBase = true };
+            mockStatement.Setup(x => x.ExecuteUpdate()).Returns(new UpdateResult(3));
+
+            AdbcCommand command = new AdbcCommand(mockStatement.Object, new AdbcClient.AdbcConnection());
+
+            Assert.Equal(3, await command.ExecuteNonQueryAsync());
+        }
+
+        [Fact]
+        public void CancelForwardsToTheStatement()
+        {
+            Mock<AdbcStatement> mockStatement = new Mock<AdbcStatement>();
+            AdbcCommand command = new AdbcCommand(mockStatement.Object, new AdbcClient.AdbcConnection());
+
+            command.Cancel();
+
+            mockStatement.Verify(x => x.Cancel(), Times.Once);
+        }
+
+        [Fact]
+        public void CancelDoesNotThrowWhenTheDriverCannotCancel()
+        {
+            // The base AdbcStatement.Cancel throws NotImplemented
+            Mock<AdbcStatement> mockStatement = new Mock<AdbcStatement>() { CallBase = true };
+            AdbcCommand command = new AdbcCommand(mockStatement.Object, new AdbcClient.AdbcConnection());
+
+            command.Cancel();
+        }
+
+        [Fact]
+        public async Task ExecuteNonQueryAsyncHonorsAPreCancelledToken()
+        {
+            Mock<AdbcStatement> mockStatement = new Mock<AdbcStatement>();
+            AdbcCommand command = new AdbcCommand(mockStatement.Object, new AdbcClient.AdbcConnection());
+
+            using CancellationTokenSource cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => command.ExecuteNonQueryAsync(cts.Token));
+            mockStatement.Verify(x => x.ExecuteUpdateAsync(It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task ReadAsyncPassesTheCancellationTokenToTheStream()
+        {
+            AsyncReaderFixture fixture = AsyncReaderFixture.Create(batchCount: 2, rowsPerBatch: 1);
+
+            using CancellationTokenSource cts = new CancellationTokenSource();
+            using DbDataReader reader = await fixture.Command.ExecuteReaderAsync(cts.Token);
+
+            Assert.True(await reader.ReadAsync(cts.Token));
+            Assert.Equal(cts.Token, fixture.Stream.LastToken);
+
+            cts.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reader.ReadAsync(cts.Token));
+        }
+
+        [Fact]
+        public async Task ReadAsyncRethrowsAfterAMidStreamErrorInsteadOfServingStaleRows()
+        {
+            AsyncReaderFixture fixture = AsyncReaderFixture.Create(batchCount: 2, rowsPerBatch: 2, throwAtCall: 1);
+
+            using DbDataReader reader = await fixture.Command.ExecuteReaderAsync();
+
+            Assert.True(await reader.ReadAsync());
+            Assert.True(await reader.ReadAsync());
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => reader.ReadAsync());
+            await Assert.ThrowsAsync<InvalidOperationException>(() => reader.ReadAsync());
+        }
+
+        [Fact]
+        public async Task ExecuteReaderAsyncStillWorksWhenTheDriverOnlyOverridesExecuteQuery()
+        {
+            const int batchCount = 2;
+            const int rowsPerBatch = 2;
+            int expectedRows = batchCount * rowsPerBatch;
+
+            AsyncReaderFixture fixture = AsyncReaderFixture.Create(batchCount, rowsPerBatch, syncOnlyDriver: true);
+
+            int rows = 0;
+
+            using (DbDataReader reader = await fixture.Command.ExecuteReaderAsync())
+            {
+                while (await reader.ReadAsync())
+                {
+                    rows++;
+                }
+            }
+
+            Assert.Equal(expectedRows, rows);
+            fixture.Statement.Verify(x => x.ExecuteQuery(), Times.Once);
+        }
+
+        [Fact]
+        public void ReadStillDrainsAnAsynchronousStream()
+        {
+            const int batchCount = 2;
+            const int rowsPerBatch = 3;
+            int expectedRows = batchCount * rowsPerBatch;
+
+            AsyncReaderFixture fixture = AsyncReaderFixture.Create(batchCount, rowsPerBatch, syncOnlyDriver: true);
+
+            int rows = 0;
+
+            using (AdbcDataReader reader = fixture.Command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    rows++;
+                }
+            }
+
+            Assert.Equal(expectedRows, rows);
+        }
     }
 
     internal class ConnectionStringExample
@@ -322,6 +554,154 @@ namespace Apache.Arrow.Adbc.Tests.Client
                 return new ValueTask<RecordBatch>();
             else
                 return new ValueTask<RecordBatch>(this.recordBatches[calls]);
+        }
+    }
+
+    /// <summary>
+    /// An <see cref="IArrowArrayStream"/> that suspends before producing a batch, and can
+    /// fail on a chosen fetch.
+    /// </summary>
+    class AsyncArrayStream : IArrowArrayStream
+    {
+        private readonly List<RecordBatch> recordBatches;
+        private readonly Schema schema;
+        private readonly int throwAtCall;
+
+        // start at -1 to use the count of calls as the index
+        private int calls = -1;
+
+        public AsyncArrayStream(Schema schema, List<RecordBatch> recordBatches, int throwAtCall)
+        {
+            this.schema = schema;
+            this.recordBatches = recordBatches;
+            this.throwAtCall = throwAtCall;
+        }
+
+        public Schema Schema => this.schema;
+
+        public CancellationToken LastToken { get; private set; }
+
+        public void Dispose() { }
+
+        public async ValueTask<RecordBatch> ReadNextRecordBatchAsync(CancellationToken cancellationToken = default)
+        {
+            this.LastToken = cancellationToken;
+
+            // Yield captures the ambient SynchronizationContext, matching FlightSqlResult.
+            await Task.Yield();
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            this.calls++;
+
+            if (this.throwAtCall >= 0 && this.calls >= this.throwAtCall)
+                throw new InvalidOperationException("stream failed mid-read");
+
+            return this.calls < this.recordBatches.Count ? this.recordBatches[this.calls] : null!;
+        }
+    }
+
+    /// <summary>
+    /// A single-threaded <see cref="SynchronizationContext"/> with a message pump, as WPF,
+    /// WinForms and classic ASP.NET install. Continuations run only when the owning thread
+    /// returns to the pump.
+    /// </summary>
+    class PumpingSynchronizationContext : SynchronizationContext
+    {
+        private readonly BlockingCollection<KeyValuePair<SendOrPostCallback, object?>> queue =
+            new BlockingCollection<KeyValuePair<SendOrPostCallback, object?>>();
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            try
+            {
+                this.queue.Add(new KeyValuePair<SendOrPostCallback, object?>(d, state));
+            }
+            catch (InvalidOperationException)
+            {
+                // the pump has already been completed
+            }
+        }
+
+        public override void Send(SendOrPostCallback d, object? state) => d(state);
+
+        public void Pump()
+        {
+            foreach (KeyValuePair<SendOrPostCallback, object?> item in this.queue.GetConsumingEnumerable())
+            {
+                item.Key(item.Value);
+            }
+        }
+
+        public void Complete() => this.queue.CompleteAdding();
+    }
+
+    /// <summary>
+    /// Builds an <see cref="AdbcCommand"/> over a mocked statement and an
+    /// <see cref="AsyncArrayStream"/>.
+    /// </summary>
+    class AsyncReaderFixture
+    {
+        private AsyncReaderFixture(AdbcCommand command, Mock<AdbcStatement> statement, AsyncArrayStream stream)
+        {
+            Command = command;
+            Statement = statement;
+            Stream = stream;
+        }
+
+        public AdbcCommand Command { get; }
+
+        public Mock<AdbcStatement> Statement { get; }
+
+        public AsyncArrayStream Stream { get; }
+
+        /// <param name="syncOnlyDriver">
+        /// Stub <see cref="AdbcStatement.ExecuteQuery"/> only, leaving the base
+        /// <see cref="AdbcStatement.ExecuteQueryAsync(CancellationToken)"/> to supply the result.
+        /// </param>
+        public static AsyncReaderFixture Create(
+            int batchCount,
+            int rowsPerBatch,
+            int throwAtCall = -1,
+            bool syncOnlyDriver = false)
+        {
+            List<Field> fields = new List<Field>() { new Field("n", Int32Type.Default, true) };
+            Schema schema = new Schema(fields, new List<KeyValuePair<string, string>>());
+
+            List<RecordBatch> batches = new List<RecordBatch>();
+
+            for (int batch = 0; batch < batchCount; batch++)
+            {
+                Int32Array.Builder builder = new Int32Array.Builder();
+
+                for (int row = 0; row < rowsPerBatch; row++)
+                {
+                    builder.Append((batch * rowsPerBatch) + row);
+                }
+
+                Int32Array array = builder.Build();
+                batches.Add(new RecordBatch(schema, new List<IArrowArray>() { array }, array.Length));
+            }
+
+            AsyncArrayStream stream = new AsyncArrayStream(schema, batches, throwAtCall);
+            QueryResult queryResult = new QueryResult(batchCount * rowsPerBatch, stream);
+
+            Mock<AdbcStatement> mockStatement = new Mock<AdbcStatement>();
+
+            if (syncOnlyDriver)
+            {
+                mockStatement.CallBase = true;
+                mockStatement.Setup(x => x.ExecuteQuery()).Returns(queryResult);
+            }
+            else
+            {
+                mockStatement.Setup(x => x.ExecuteQueryAsync(It.IsAny<CancellationToken>())).Returns(new ValueTask<QueryResult>(queryResult));
+            }
+
+            AdbcClient.AdbcConnection connection = new AdbcClient.AdbcConnection();
+            AdbcCommand command = new AdbcCommand(mockStatement.Object, connection);
+
+            return new AsyncReaderFixture(command, mockStatement, stream);
         }
     }
 }

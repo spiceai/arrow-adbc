@@ -716,7 +716,7 @@ cdef class AdbcDatabase(_AdbcHandle):
             c_len -= 1
         return buf[:c_len].decode(encoding, errors)
 
-    def get_option_bytes(self, key: str) -> bytes:
+    def get_option_bytes(self, key: str | bytes) -> bytes:
         """Get the value of a binary option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -747,7 +747,7 @@ cdef class AdbcDatabase(_AdbcHandle):
 
         return bytes(buf[:c_len])
 
-    def get_option_float(self, key: str) -> float:
+    def get_option_float(self, key: str | bytes) -> float:
         """Get the value of a floating-point option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -760,7 +760,7 @@ cdef class AdbcDatabase(_AdbcHandle):
         check_error(status, &c_error)
         return c_value
 
-    def get_option_int(self, key: str) -> int:
+    def get_option_int(self, key: str | bytes) -> int:
         """Get the value of an integer option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -1016,6 +1016,18 @@ cdef class AdbcConnection(_AdbcHandle):
             column_name = _to_bytes(column_name, "column_name")
             c_column_name = column_name
 
+        cdef c_vector[const char*] c_table_types
+        cdef const char** c_table_types_ptr = NULL
+        if table_types:
+            # Keep the encoded bytes alive while c_table_types points into their buffers
+            table_types = [
+                _to_bytes(table_type, "table_types") for table_type in table_types
+            ]
+            for table_type in table_types:
+                c_table_types.push_back(table_type)
+            c_table_types.push_back(<const char*> NULL)
+            c_table_types_ptr = c_table_types.data()
+
         with nogil:
             status = AdbcConnectionGetObjects(
                 &self.connection,
@@ -1023,7 +1035,7 @@ cdef class AdbcConnection(_AdbcHandle):
                 c_catalog,
                 c_db_schema,
                 c_table_name,
-                NULL,  # TODO: support table_types
+                c_table_types_ptr,
                 c_column_name,
                 &stream.stream,
                 &c_error)
@@ -1084,7 +1096,7 @@ cdef class AdbcConnection(_AdbcHandle):
             c_len -= 1
         return buf[:c_len].decode(encoding, errors)
 
-    def get_option_bytes(self, key: str) -> bytes:
+    def get_option_bytes(self, key: str | bytes) -> bytes:
         """Get the value of a binary option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -1115,7 +1127,7 @@ cdef class AdbcConnection(_AdbcHandle):
 
         return bytes(buf[:c_len])
 
-    def get_option_float(self, key: str) -> float:
+    def get_option_float(self, key: str | bytes) -> float:
         """Get the value of a floating-point option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -1128,7 +1140,7 @@ cdef class AdbcConnection(_AdbcHandle):
         check_error(status, &c_error)
         return c_value
 
-    def get_option_int(self, key: str) -> int:
+    def get_option_int(self, key: str | bytes) -> int:
         """Get the value of an integer option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -1706,7 +1718,7 @@ cdef class AdbcStatement(_AdbcHandle):
             c_len -= 1
         return buf[:c_len].decode(encoding, errors)
 
-    def get_option_bytes(self, key: str) -> bytes:
+    def get_option_bytes(self, key: str | bytes) -> bytes:
         """Get the value of a binary option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -1737,7 +1749,7 @@ cdef class AdbcStatement(_AdbcHandle):
 
         return bytes(buf[:c_len])
 
-    def get_option_float(self, key: str) -> float:
+    def get_option_float(self, key: str | bytes) -> float:
         """Get the value of a floating-point option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status
@@ -1750,7 +1762,7 @@ cdef class AdbcStatement(_AdbcHandle):
         check_error(status, &c_error)
         return c_value
 
-    def get_option_int(self, key: str) -> int:
+    def get_option_int(self, key: str | bytes) -> int:
         """Get the value of an integer option."""
         cdef CAdbcError c_error = empty_error()
         cdef CAdbcStatusCode status

@@ -64,6 +64,8 @@ cd c
 %adbc_cmake \
   -DCMAKE_BUILD_TYPE=${cmake_build_type} \
   -G"Unix Makefiles" \
+  -DADBC_BUILD_SHARED=ON \
+  -DADBC_BUILD_STATIC=ON \
   -DADBC_DRIVER_FLIGHTSQL=ON \
   -DADBC_DRIVER_MANAGER=ON \
   -DADBC_DRIVER_POSTGRESQL=ON \
@@ -321,7 +323,7 @@ Documentation for Apache Arrow GLib integration.
 %{_docdir}/adbc-arrow-glib/
 
 %changelog
-* Fri Jul 24 2026 David Li <li.davidm96@gmail.com> - 24-1
+* Wed Oct 21 2026 David Li <li.davidm96@gmail.com> - 25-1
 - New upstream release.
 
 * Tue Apr 28 2026 Bryce Mecum <brycemecum@gmail.com> - 0.12.0-1

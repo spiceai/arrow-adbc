@@ -31,6 +31,7 @@ set -e
 : ${ADBC_USE_UBSAN:=ON}
 
 : ${ADBC_CMAKE_ARGS:=""}
+: ${ADBC_CLANG_TIDY_ARGS:=""}
 : ${CMAKE_BUILD_TYPE:=Debug}
 
 build_subproject() {
@@ -44,8 +45,8 @@ build_subproject() {
 
     # XXX(https://github.com/llvm/llvm-project/issues/46804): expand
     # CC and CXX symlinks
-    env CC=$(readlink -f ${CC:-$(which cc)}) \
-        CXX=$(readlink -f ${CXX:-$(which c++)}) \
+    env CC=$(readlink -f $(which ${CC:-cc})) \
+        CXX=$(readlink -f $(which ${CXX:-c++})) \
         cmake "${source_dir}/c" \
         ${ADBC_CMAKE_ARGS} \
         -DADBC_BUILD_SHARED="${ADBC_BUILD_SHARED}" \
@@ -63,6 +64,7 @@ build_subproject() {
         -DCMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}"
 
     run-clang-tidy \
+        ${ADBC_CLANG_TIDY_ARGS} \
         -extra-arg=-Wno-unknown-warning-option \
         -extra-arg=-Wno-unused-command-line-argument \
         -j $(nproc) \

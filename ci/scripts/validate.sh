@@ -22,6 +22,7 @@ set -euo pipefail
 
 : ${BUILD_ALL:=1}
 : ${BUILD_DRIVER_POSTGRESQL:=${BUILD_ALL}}
+: ${BUILD_DRIVER_SQLITE:=${BUILD_ALL}}
 
 : ${ADBC_USE_ASAN:=OFF}
 : ${ADBC_USE_UBSAN:=OFF}
@@ -30,6 +31,7 @@ set -euo pipefail
 test_project() {
     local -r subdir="${1}"
     local -r run=$(echo "${2}" | tr '[:upper:]' '[:lower:]')
+    shift 2
 
     case "${run}" in
         1|on)
@@ -59,15 +61,17 @@ test_project() {
     fi
 
     pushd "${subdir}"
-    echo env ${options[@]} pytest -vvs --junit-xml=validation-report.xml -rfEsxX tests/
-    env ${options[@]} pytest -vvs --junit-xml=validation-report.xml -rfEsxX tests/
+    echo env ${options[@]} pytest -vvs --junit-xml=validation-report.xml -rfEsxX tests/ "$@"
+    env ${options[@]} pytest -vvs --junit-xml=validation-report.xml -rfEsxX tests/ "$@"
     popd
 }
 
 main() {
     local -r source_dir="${1}"
+    shift
 
-    test_project "${source_dir}/c/driver/postgresql/validation" "${BUILD_DRIVER_POSTGRESQL}"
+    test_project "${source_dir}/c/driver/postgresql/validation" "${BUILD_DRIVER_POSTGRESQL}" "$@"
+    test_project "${source_dir}/c/driver/sqlite/validation" "${BUILD_DRIVER_SQLITE}" "$@"
 }
 
 main "$@"

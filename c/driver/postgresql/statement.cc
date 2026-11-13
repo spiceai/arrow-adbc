@@ -96,13 +96,20 @@ int TupleReader::GetCopyData() {
     PQclear(result_);
     result_ = PQgetResult(conn_);
     const ExecStatusType pq_status = PQresultStatus(result_);
+    int errno_result = ENODATA;
     if (pq_status != PGRES_COMMAND_OK) {
-      status_ = SetError(&error_, result_, "[libpq] Execution error [%s]: %s",
-                         PQresStatus(pq_status), PQresultErrorMessage(result_));
-      return InternalAdbcStatusCodeToErrno(status_);
-    } else {
-      return ENODATA;
+      status_ = MakeStatus(result_, "[libpq] Execution error [{}]: {}",
+                           PQresStatus(pq_status), PQresultErrorMessage(result_))
+                    .ToAdbc(&error_);
+      errno_result = InternalAdbcStatusCodeToErrno(status_);
     }
+
+    // Drain remaining responses
+    PQclear(result_);
+    while ((result_ = PQgetResult(conn_)) != nullptr) {
+      PQclear(result_);
+    }
+    return errno_result;
   }
 
   data_.size_bytes = get_copy_res;
@@ -324,6 +331,7 @@ AdbcStatusCode PostgresStatement::New(struct AdbcConnection* connection,
   connection_ =
       *reinterpret_cast<std::shared_ptr<PostgresConnection>*>(connection->private_data);
   type_resolver_ = connection_->type_resolver();
+  use_copy_ = connection_->use_copy();
   ClearResult();
   return ADBC_STATUS_OK;
 }
@@ -441,8 +449,9 @@ AdbcStatusCode PostgresStatement::CreateBulkTable(const std::string& current_sch
                                       /*resultFormat=*/1 /*(binary)*/);
       if (PQresultStatus(result) != PGRES_COMMAND_OK) {
         AdbcStatusCode code =
-            SetError(error, result, "[libpq] Failed to drop table: %s\nQuery was: %s",
-                     PQerrorMessage(conn), drop.c_str());
+            MakeStatus(result, "[libpq] Failed to drop table: {}\nQuery was: {}",
+                       PQerrorMessage(conn), drop)
+                .ToAdbc(error);
         PQclear(result);
         return code;
       }
@@ -503,8 +512,9 @@ AdbcStatusCode PostgresStatement::CreateBulkTable(const std::string& current_sch
                                   /*resultFormat=*/1 /*(binary)*/);
   if (PQresultStatus(result) != PGRES_COMMAND_OK) {
     AdbcStatusCode code =
-        SetError(error, result, "[libpq] Failed to create table: %s\nQuery was: %s",
-                 PQerrorMessage(conn), create.c_str());
+        MakeStatus(result, "[libpq] Failed to create table: {}\nQuery was: {}",
+                   PQerrorMessage(conn), create)
+            .ToAdbc(error);
     PQclear(result);
     return code;
   }
@@ -546,7 +556,7 @@ AdbcStatusCode PostgresStatement::ResolveCopyTargetTypes(
       InternalAdbcSetError(error,
                            "[libpq] Column \"%s\" does not exist in target table %s",
                            field_name.c_str(), escaped_table.c_str());
-      return ADBC_STATUS_INVALID_ARGUMENT;
+      return ADBC_STATUS_ALREADY_EXISTS;
     }
 
     PostgresType pg_type;
@@ -598,7 +608,7 @@ AdbcStatusCode PostgresStatement::ExecuteQuery(struct ArrowArrayStream* stream,
 
   // If we have been requested to avoid COPY or there is no output requested,
   // execute using the PqResultArrayReader.
-  if (!stream || !UseCopy()) {
+  if (!stream || !use_copy()) {
     PqResultArrayReader reader(connection_->conn(), type_resolver_, query_);
     reader.SetVendorName(connection_->VendorName());
     RAISE_STATUS(error, reader.ToArrayStream(rows_affected, stream));
@@ -755,8 +765,9 @@ AdbcStatusCode PostgresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
   PGresult* result = PQexec(connection_->conn(), query.c_str());
   if (PQresultStatus(result) != PGRES_COPY_IN) {
     AdbcStatusCode code =
-        SetError(error, result, "[libpq] COPY query failed: %s\nQuery was:%s",
-                 PQerrorMessage(connection_->conn()), query.c_str());
+        MakeStatus(result, "[libpq] COPY query failed: {}\nQuery was: {}",
+                   PQerrorMessage(connection_->conn()), query)
+            .ToAdbc(error);
     PQclear(result);
     return code;
   }
@@ -794,7 +805,7 @@ AdbcStatusCode PostgresStatement::GetOption(const char* key, char* value, size_t
   } else if (std::strcmp(key, ADBC_POSTGRESQL_OPTION_BATCH_SIZE_HINT_BYTES) == 0) {
     result = std::to_string(reader_->batch_size_hint_bytes_);
   } else if (std::strcmp(key, ADBC_POSTGRESQL_OPTION_USE_COPY) == 0) {
-    if (UseCopy()) {
+    if (use_copy()) {
       result = "true";
     } else {
       result = "false";
@@ -1000,7 +1011,5 @@ void PostgresStatement::ClearResult() {
   reader_ = std::make_shared<TupleReader>(connection_->conn());
   reader_->batch_size_hint_bytes_ = batch_size_hint_bytes_;
 }
-
-int PostgresStatement::UseCopy() { return use_copy_; }
 
 }  // namespace adbcpq

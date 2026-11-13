@@ -227,7 +227,7 @@ fn cancel_reaches_a_running_execute() {
         .set_sql_query("SELECT 1")
         .expect("the query should be set");
 
-    let mut canceller = statement.clone();
+    let canceller = statement.get_cancel_handle();
     let executor = std::thread::spawn(move || statement.execute().err().map(|e| e.status));
 
     // Cancel a call that has actually started, so a pass cannot come from
@@ -242,7 +242,9 @@ fn cancel_reaches_a_running_execute() {
     }
 
     let cancel_started = Instant::now();
-    canceller.cancel().expect("the cancel should be accepted");
+    canceller
+        .try_cancel()
+        .expect("the cancel should be accepted");
     let cancel_took = cancel_started.elapsed();
 
     let execute_status = executor
