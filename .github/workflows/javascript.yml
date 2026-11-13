@@ -50,12 +50,12 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Setup node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
@@ -91,6 +91,8 @@ jobs:
             target: aarch64-apple-darwin
           - host: windows-latest
             target: x86_64-pc-windows-msvc
+          - host: windows-11-arm
+            target: aarch64-pc-windows-msvc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - host: ubuntu-24.04-arm
@@ -98,12 +100,12 @@ jobs:
     name: Build Node.js ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Setup node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
@@ -125,7 +127,7 @@ jobs:
         working-directory: javascript
         run: codesign --sign - *.node
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bindings-${{ matrix.settings.target }}
           path: javascript/*.node
@@ -149,13 +151,15 @@ jobs:
             target: aarch64-apple-darwin
           - host: windows-latest
             target: x86_64-pc-windows-msvc
+          - host: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Setup node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
@@ -164,25 +168,25 @@ jobs:
         working-directory: javascript
         run: npm ci --omit=optional
       - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: bindings-${{ matrix.settings.target }}
           path: javascript
-      - name: Setup conda (Windows)
-        if: runner.os == 'Windows'
-        uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
-        with:
-          miniforge-version: latest
       - name: Install C++ dependencies (Windows)
+        # SQLite is the only dependency the test driver build needs, so take
+        # it from the runner's preinstalled vcpkg (present on both the x64 and
+        # arm64 images) rather than conda. The static-md triplet links SQLite
+        # into the driver DLL, so nothing extra has to go on PATH at runtime.
         if: runner.os == 'Windows'
-        run: conda install -c conda-forge --file ci/conda_env_cpp.txt
+        shell: pwsh
+        run: |
+          $triplet = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64-windows-static-md' } else { 'x64-windows-static-md' }
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "sqlite3:$triplet"
+          $toolchain = "$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" -replace '\\', '/'
+          echo "ADBC_CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE=$toolchain -DVCPKG_TARGET_TRIPLET=$triplet" >> $env:GITHUB_ENV
       - name: Install C++ dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install libsqlite3-dev
-      - name: Set cmake args (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: echo "ADBC_CMAKE_ARGS=-DCMAKE_PREFIX_PATH=$env:CONDA_PREFIX/Library" >> $env:GITHUB_ENV
       - name: Build Driver
         # We need to build the SQLite driver for tests.
         shell: bash
@@ -197,7 +201,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          echo "PATH=${{ github.workspace }}/javascript/build/bin;$env:CONDA_PREFIX\Library\bin;$env:PATH" >> $env:GITHUB_ENV
+          echo "PATH=${{ github.workspace }}/javascript/build/bin;$env:PATH" >> $env:GITHUB_ENV
           echo "ADBC_DRIVER_MANAGER_TEST_LIB=${{ github.workspace }}/javascript/build/bin/adbc_driver_sqlite.dll" >> $env:GITHUB_ENV
       - name: Run Tests
         working-directory: javascript

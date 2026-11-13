@@ -46,14 +46,27 @@ Usage:
   Verify current checkout:
     $($script)
 
-Assumes Mamba is set up and available on the path.
+  Verify only the wheels:
+    `$env:TEST_DEFAULT = "0"
+    `$env:TEST_WHEELS = "1"
+    $($script) X.Y.Z RC_NUMBER
+
+Assumes Mamba is set up and available on the path, except for Windows ARM64
+binary verification. On Windows ARM64, supply Python executable paths using
+PYTHON_314_PATH, etc. (Source verification is not supported on Windows/ARM64.)
 "@
     exit 1
 }
 
+function Show-Header {
+    echo ""
+    echo "============================================================"
+    echo $args[0]
+    echo "============================================================"
+}
+
 $ArrowDistUrl = "https://dist.apache.org/repos/dist/dev/arrow"
 $DistName = "apache-arrow-adbc-$($Version)"
-
 function Download-Dist-File {
     $DistUrl = "$($ArrowDistUrl)/$($DistName)-rc$($RcNumber)/$($args[0])"
     $DistPath = Join-Path $ArrowTempDir $args[0]
@@ -67,12 +80,197 @@ function Download-Dist-File {
     }
 }
 
-function Show-Header {
-    echo ""
-    echo "============================================================"
-    echo $args[0]
-    echo "============================================================"
+# ============================================================
+# What to test
+# ============================================================
+
+function Get-Bool($envname, [bool] $default) {
+    if (-not (Test-Path -Path "Env:$envname")) {
+        return $default
+    }
+
+    $value = (Get-Item -Path "Env:$envname").Value
+    switch ($value) {
+        "1" { return $true }
+        "0" { return $false }
+        "true" { return $true }
+        "false" { return $false }
+        "on" { return $true }
+        "off" { return $false }
+        "yes" { return $true }
+        "no" { return $false }
+        default { throw "Invalid boolean value for $($envname): $($value)" }
+    }
 }
+
+$TestDefault = Get-Bool "TEST_DEFAULT" $true
+$TestSource = Get-Bool "TEST_SOURCE" $TestDefault
+$TestBinaries = Get-Bool "TEST_BINARIES" $TestDefault
+$TestBinaries = $TestBinaries -and ($SourceKind -eq "tarball")
+$TestJars = Get-Bool "TEST_JARS" $TestBinaries
+$TestWheels = Get-Bool "TEST_WHEELS" $TestBinaries
+$TestBinaryArtifacts = $TestJars -or $TestWheels
+
+if (-not $TestSource -and -not $TestBinaryArtifacts) {
+    echo "Nothing to test, exiting"
+    exit 1
+}
+
+echo "Default: $($TestDefault)"
+echo "Source: $($TestSource)"
+echo "Binaries: $($TestBinaries)"
+echo "- JARs: $($TestJars)"
+echo "- Wheels: $($TestWheels)"
+
+function Enable-Conda {
+    if (-not $script:CondaInitialized) {
+        Invoke-Expression $(conda shell.powershell hook | Out-String)
+        $script:CondaInitialized = $true
+    }
+}
+
+function Test-PythonWheels($PythonVersion, $PythonPath) {
+    Show-Header "Verify Python $($PythonVersion) Wheels for $($Platform)/$($Architecture)"
+    $FreeThreaded = $PythonVersion.EndsWith("t")
+    $PythonTag = "cp$($PythonVersion.TrimEnd('t').Replace('.', ''))"
+    if ($FreeThreaded) {
+        $AbiTag = "$($PythonTag)t"
+    } else {
+        $AbiTag = $PythonTag
+    }
+    $IsWindowsArm = $IsWindowsPlatform -and $Architecture -eq "arm64"
+
+    $env:PYTHON_VERSION = $PythonVersion
+    $env:ADBC_NO_SKIP_TESTS = "0"
+    if ($IsWindowsArm -and -not $FreeThreaded) {
+        $env:ADBC_NO_SKIP_TESTS = "1"
+    }
+    try {
+        if ($FreeThreaded) {
+            $env:PYTHON_GIL = "0"
+        } else {
+            Remove-Item -Path Env:PYTHON_GIL -ErrorAction SilentlyContinue
+        }
+
+        $WheelPaths = @()
+        foreach ($Component in $Components) {
+            if ($Component -eq "adbc_driver_manager") {
+                $WheelPattern = "$($Component)-*-$($PythonTag)-$($AbiTag)-$($PlatformPattern).whl"
+            } else {
+                $WheelPattern = "$($Component)-*-py3-none-$($PlatformPattern).whl"
+            }
+            $MatchingWheels = @(Get-ChildItem -Path $BinaryDir -Filter $WheelPattern)
+            if ($MatchingWheels.Count -ne 1) {
+                throw "Expected exactly one $($Component) wheel matching $($WheelPattern), found $($MatchingWheels.Count)"
+            }
+            $WheelPaths += $MatchingWheels[0].FullName
+        }
+
+        & $PythonPath -m pip install --no-deps --force-reinstall $WheelPaths
+        if (-not $?) { throw "Failed to install Python $($PythonVersion) wheels" }
+
+        $TestDependencies = @("pytest", "typing-extensions")
+        if ($IsWindowsPlatform -and -not $IsWindowsArm) {
+            $TestDependencies += @("pyarrow", "pandas", "protobuf")
+        }
+        & $PythonPath -m pip install $TestDependencies
+        if (-not $?) { throw "Failed to install Python $($PythonVersion) wheel test dependencies" }
+
+        if (-not $IsWindowsPlatform) {
+            & $(Join-Path $AdbcSourceDir "ci/scripts/python_wheel_unix_test.sh") $AdbcSourceDir
+            if (-not $?) { throw "Failed to test wheels with Python $($PythonVersion)" }
+            return
+        }
+
+        foreach ($Component in $Components) {
+            & $PythonPath -c "import $($Component); import $($Component).dbapi"
+            if (-not $?) { throw "Failed to import $($Component) with Python $($PythonVersion)" }
+        }
+
+        if (-not $IsWindowsArm) {
+            foreach ($Component in $Components) {
+                echo "Testing $($Component)"
+                $TestsPath = Join-Path $AdbcSourceDir "python/$($Component)/tests"
+                & $PythonPath -m pytest -vvx --import-mode=append `
+                    -k "not duckdb and not sqlite and not polars" $TestsPath
+                if (-not $?) { throw "Failed to test $($Component) with Python $($PythonVersion)" }
+            }
+        } elseif ($FreeThreaded) {
+            & $PythonPath -m pytest -vvx --import-mode append `
+                -k "unknown_driver or missing_platform or bad" `
+                (Join-Path $AdbcSourceDir "python/adbc_driver_manager/tests/test_manifest.py")
+            if (-not $?) { throw "Failed to test the free-threaded driver manager with Python $($PythonVersion)" }
+        } else {
+            & $PythonPath -m pip install polars
+            if (-not $?) { throw "Failed to install Polars with Python $($PythonVersion)" }
+            # The fixture loads SQLite by name, but wheels bundle the library inside
+            # the Python package as libadbc_driver_sqlite.so, even on Windows.
+            $SqliteDriverPath = & $PythonPath -c "import adbc_driver_sqlite; print(adbc_driver_sqlite._driver_path())"
+            if (-not $?) { throw "Failed to locate the SQLite driver with Python $($PythonVersion)" }
+            $DriverManifestDir = Join-Path $ArrowTempDir "wheel-drivers-$($PythonVersion)-$($Platform)-$($Architecture)"
+            New-Item -ItemType Directory -Force -Path $DriverManifestDir | Out-Null
+            $DriverManifest = Join-Path $DriverManifestDir "adbc_driver_sqlite.toml"
+            $DriverPathJson = $SqliteDriverPath | ConvertTo-Json -Compress
+            [System.IO.File]::WriteAllText($DriverManifest, "[Driver]`nshared = $($DriverPathJson)`n")
+            try {
+                $env:ADBC_DRIVER_PATH = $DriverManifestDir
+                & $PythonPath -m pytest -vvx --import-mode append `
+                    (Join-Path $AdbcSourceDir "python/adbc_driver_manager/tests/test_dbapi_polars_nopyarrow.py")
+                if (-not $?) { throw "Failed to test the driver manager with Polars with Python $($PythonVersion)" }
+            } finally {
+                Remove-Item -Path Env:ADBC_DRIVER_PATH -ErrorAction SilentlyContinue
+            }
+        }
+    } finally {
+        Remove-Item -Path Env:PYTHON_GIL -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-PythonWheelsConda($PythonVersion) {
+    Enable-Conda
+    $CondaEnv = Join-Path $ArrowTempDir "wheel-$($PythonVersion)-$($Platform)-$($Architecture)"
+    if ($IsWindowsPlatform) {
+        $CondaPython = Join-Path $CondaEnv "python.exe"
+    } else {
+        $CondaPython = Join-Path $CondaEnv "bin/python"
+    }
+    if (-not (Test-Path -Path $CondaPython -PathType Leaf)) {
+        $CondaPackages = @("python=$($PythonVersion.TrimEnd('t'))")
+        if ($PythonVersion.EndsWith("t")) {
+            $CondaPackages += "python-freethreading"
+        }
+        mamba create -c conda-forge --yes --prefix $CondaEnv $CondaPackages
+        if (-not $?) { throw "Failed to create Python $($PythonVersion) Conda environment" }
+    } else {
+        echo "Using cached $($CondaEnv)"
+    }
+    conda activate $CondaEnv
+    Test-PythonWheels $PythonVersion $CondaPython
+}
+
+function Test-PythonWheelsWithInterpreter($PythonVersion) {
+    $PythonPathVariable = "PYTHON_$($PythonVersion.Replace('.', '').ToUpperInvariant())_PATH"
+    $PythonPath = [Environment]::GetEnvironmentVariable($PythonPathVariable)
+    if ([string]::IsNullOrEmpty($PythonPath)) {
+        echo "Skipping Python $($PythonVersion): $($PythonPathVariable) is not set or empty"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
+        throw "Invalid Python executable in $($PythonPathVariable): $($PythonPath)"
+    }
+
+    # Let the supplied interpreter use its default GIL setting during setup.
+    Remove-Item -Path Env:PYTHON_GIL -ErrorAction SilentlyContinue
+    $VenvDir = Join-Path $ArrowTempDir "wheel-venv-$($PythonVersion)-$($Platform)-$($Architecture)"
+    & $PythonPath -m venv --clear $VenvDir
+    if (-not $?) { throw "Failed to create Python $($PythonVersion) virtual environment" }
+    $VenvPython = Join-Path $VenvDir "Scripts/python.exe"
+    Test-PythonWheels $PythonVersion $VenvPython
+}
+
+# ============================================================
+# Set up common artifacts
+# ============================================================
 
 Show-Header "Create Temporary Directory"
 if ($env:ARROW_TMPDIR -eq $null) {
@@ -82,81 +280,263 @@ if ($env:ARROW_TMPDIR -eq $null) {
     $ArrowTempDir = $env:ARROW_TMPDIR
 }
 New-Item -ItemType Directory -Force -Path $ArrowTempDir | Out-Null
-
 echo "Using $($ArrowTempDir)"
 
-Show-Header "Ensure Source Directory"
+$AdbcSourceDir = Join-Path $PSScriptRoot "..\.." | Resolve-Path | % { $_.Path }
 
-if ($SourceKind -eq "local") {
-    $ArrowSourceDir = Join-Path $PSScriptRoot "..\.." | Resolve-Path | % { $_.Path }
+Show-Header "Clone apache/arrow"
+$ArrowSourceDir = Join-Path $ArrowTempDir "arrow"
+$StampFile = Join-Path $ArrowSourceDir "stamp.txt"
+if (-not (Test-Path -Path $StampFile)) {
+    git clone --depth 1 https://github.com/apache/arrow $ArrowSourceDir
+    if (-not $?) { throw "Failed to clone apache/arrow" }
+    New-Item -ItemType File -Force -Path $StampFile | Out-Null
 } else {
-    $ArrowSourceDir = Join-Path $ArrowTempDir $DistName
-    New-Item -ItemType Directory -Path $ArrowSourceDir -Force
-    # Convert to an absolute now that it should exist
-    $ArrowSourceDir = $ArrowSourceDir | Resolve-Path | % { $_.Path }
-
-    Download-Dist-File "$($DistName).tar.gz"
-    Download-Dist-File "$($DistName).tar.gz.sha512"
-
-    $DistPath = Join-Path $ArrowTempDir "$($DistName).tar.gz"
-    $Sha512Path = Join-Path $ArrowTempDir "$($DistName).tar.gz.sha512"
-
-    $ExpectedSha512 = (Get-Content $Sha512Path).Split(" ")[0]
-    if (-not ((Get-FileHash -Algorithm SHA512 $DistPath).Hash -eq $ExpectedSha512)) {
-        echo "SHA512 hash mismatch"
-        exit 1
-    }
-
-    tar -C $ArrowSourceDir --strip-components 1 -xf $DistPath
+    echo "Using cached $($ArrowSourceDir)"
 }
 
-echo "Using $($ArrowSourceDir)"
+$BinaryDir = Join-Path $ArrowTempDir "binaries"
+if ($TestBinaryArtifacts) {
+    Show-Header "Download binary artifacts"
 
-Show-Header "Create Conda Environment"
+    $StampFile = Join-Path $BinaryDir "stamp.txt"
+    if (-not (Test-Path -Path $StampFile)) {
+        python "$ArrowSourceDir/dev/release/download_rc_binaries.py" `
+               $Version $RcNumber `
+               --dest="$BinaryDir" `
+               --num_parallel 4 `
+               --package_type=github `
+               --repository="apache/arrow-adbc" `
+               --tag="apache-arrow-adbc-$($Version)-rc$($RcNumber)"
+        if (-not $?) { throw "Failed to download binary artifacts" }
+        New-Item -ItemType File -Force -Path $StampFile | Out-Null
+    } else {
+        echo "Using cached $($BinaryDir)"
+    }
+}
 
-mamba create -c conda-forge --yes --prefix $(Join-Path $ArrowTempDir conda-env) `
-  --file $(Join-Path $ArrowSourceDir ci\conda_env_cpp.txt) `
-  --file $(Join-Path $ArrowSourceDir ci\conda_env_python.txt) `
-  go `
-  m2w64-gcc
 
-Invoke-Expression $(conda shell.powershell hook | Out-String)
-conda activate $(Join-Path $ArrowTempDir conda-env)
-# XXX: force bundled gtest as the conda-forge version appears to require you
-# to exactly match the MSVC version it was compiled with.  Uninstalling also
-# removes a bunch of other things, so force-remove instead
-# (https://github.com/conda-forge/libprotobuf-feedstock/issues/186)
-# Use conda, mamba appears to ignore --force
-conda remove -y --force gtest
+# ============================================================
+# Test release
+# ============================================================
+if ($TestSource) {
+    Show-Header "Ensure Source Directory"
 
-# Activating doesn't appear to set GOROOT
-$env:GOROOT = $(Join-Path $ArrowTempDir conda-env go)
+    if ($SourceKind -eq "local") {
+        $ArrowSourceDir = Join-Path $PSScriptRoot "..\.." | Resolve-Path | % { $_.Path }
+    } else {
+        $ArrowSourceDir = Join-Path $ArrowTempDir $DistName
+        New-Item -ItemType Directory -Path $ArrowSourceDir -Force
+        # Convert to an absolute now that it should exist
+        $ArrowSourceDir = $ArrowSourceDir | Resolve-Path | % { $_.Path }
 
-Show-Header "Verify C/C++ Sources"
+        Download-Dist-File "$($DistName).tar.gz"
+        Download-Dist-File "$($DistName).tar.gz.sha512"
 
-$CppBuildDir = Join-Path $ArrowTempDir cpp-build
-New-Item -ItemType Directory -Force -Path $CppBuildDir | Out-Null
+        $DistPath = Join-Path $ArrowTempDir "$($DistName).tar.gz"
+        $Sha512Path = Join-Path $ArrowTempDir "$($DistName).tar.gz.sha512"
 
-$env:_ADBC_IS_CONDA = "1"
-# XXX(apache/arrow-adbc#634): not working on Windows due to it picking
-# up MSVC as the C compiler, which then blows up when /Werror gets
-# passed in by some package
-$env:BUILD_DRIVER_FLIGHTSQL = "0"
+        $ExpectedSha512 = (Get-Content $Sha512Path).Split(" ")[0]
+        if (-not ((Get-FileHash -Algorithm SHA512 $DistPath).Hash -eq $ExpectedSha512)) {
+            echo "SHA512 hash mismatch"
+            exit 1
+        }
 
-& $(Join-Path $ArrowSourceDir ci\scripts\cpp_build.ps1) $ArrowSourceDir $CppBuildDir
-if (-not $?) { exit 1 }
+        tar -C $ArrowSourceDir --strip-components 1 -xf $DistPath
+    }
 
-$env:BUILD_DRIVER_POSTGRESQL = "0"
-& $(Join-Path $ArrowSourceDir ci\scripts\cpp_test.ps1) $CppBuildDir
-if (-not $?) { exit 1 }
-$env:BUILD_DRIVER_POSTGRESQL = "1"
+    echo "Using $($ArrowSourceDir)"
 
-Show-Header "Verify Python Sources"
+    Show-Header "Create Conda Environment"
 
-& $(Join-Path $ArrowSourceDir ci\scripts\python_build.ps1) $ArrowSourceDir $CppBuildDir
-if (-not $?) { exit 1 }
+    $PlatformSpecificPackages = @()
+    if ($env:OS -eq "Windows_NT") {
+        $PlatformSpecificPackages += "m2w64-gcc"
+    }
+    mamba create -c conda-forge --yes --prefix $(Join-Path $ArrowTempDir conda-env) `
+      --file $(Join-Path $ArrowSourceDir ci\conda_env_cpp.txt) `
+      --file $(Join-Path $ArrowSourceDir ci\conda_env_python.txt) `
+      go `
+      $PlatformSpecificPackages
 
-& $(Join-Path $ArrowSourceDir ci\scripts\python_test.ps1) $ArrowSourceDir $CppBuildDir
-if (-not $?) { exit 1 }
+    Enable-Conda
+    conda activate $(Join-Path $ArrowTempDir conda-env)
+    # XXX: force bundled gtest as the conda-forge version appears to require you
+    # to exactly match the MSVC version it was compiled with.  Uninstalling also
+    # removes a bunch of other things, so force-remove instead
+    # (https://github.com/conda-forge/libprotobuf-feedstock/issues/186)
+    # Use conda, mamba appears to ignore --force
+    conda remove -y --force gtest
+
+    # Activating doesn't appear to set GOROOT
+    $env:GOROOT = $(Join-Path $ArrowTempDir $(Join-Path conda-env go))
+
+    Show-Header "Verify C/C++ Sources"
+
+    $CppBuildDir = Join-Path $ArrowTempDir cpp-build
+    New-Item -ItemType Directory -Force -Path $CppBuildDir | Out-Null
+
+    $env:_ADBC_IS_CONDA = "1"
+    # XXX(apache/arrow-adbc#634): not working on Windows due to it picking
+    # up MSVC as the C compiler, which then blows up when /Werror gets
+    # passed in by some package
+    $env:BUILD_DRIVER_FLIGHTSQL = "0"
+
+    & $(Join-Path $ArrowSourceDir ci\scripts\cpp_build.ps1) $ArrowSourceDir $CppBuildDir
+    if (-not $?) { exit 1 }
+
+    $env:BUILD_DRIVER_POSTGRESQL = "0"
+    & $(Join-Path $ArrowSourceDir ci\scripts\cpp_test.ps1) $CppBuildDir
+    if (-not $?) { exit 1 }
+    $env:BUILD_DRIVER_POSTGRESQL = "1"
+
+    Show-Header "Verify Python Sources"
+
+    & $(Join-Path $ArrowSourceDir ci\scripts\python_build.ps1) $ArrowSourceDir $CppBuildDir
+    if (-not $?) { exit 1 }
+
+    & $(Join-Path $ArrowSourceDir ci\scripts\python_test.ps1) $ArrowSourceDir $CppBuildDir
+    if (-not $?) { exit 1 }
+}
+
+if ($TestBinaryArtifacts) {
+    Show-Header "Verify Binary Distribution"
+
+    if ($TestWheels) {
+        Show-Header "Verify Python Wheels"
+
+        $UseCondaForWheels = $true
+        $IsWindowsPlatform = $env:OS -eq "Windows_NT"
+        if ($IsWindowsPlatform) {
+            $Platform = "windows"
+            if ($env:PROCESSOR_ARCHITECTURE -eq "AMD64") {
+                $PlatformPattern = "win_amd64"
+                $Architecture = "amd64"
+            } elseif ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+                $UseCondaForWheels = $false
+                $PlatformPattern = "win_arm64"
+                $Architecture = "arm64"
+            } else {
+                throw "Unknown Windows architecture: $($env:PROCESSOR_ARCHITECTURE)"
+            }
+        } else {
+            $Kernel = (uname -s)
+            $Machine = (uname -m)
+            if ($Kernel -eq "Darwin") {
+                $Platform = "macosx"
+                if ($Machine -eq "arm64") {
+                    $Architecture = "arm64"
+                } else {
+                    $Architecture = "x86_64"
+                }
+            } elseif ($Kernel -eq "Linux") {
+                $Platform = "manylinux"
+                if ($Machine -eq "aarch64") {
+                    $Architecture = "aarch64"
+                } else {
+                    $Architecture = "x86_64"
+                }
+            } else {
+                throw "Unsupported platform: $($Kernel)"
+            }
+            $PlatformPattern = "$($Platform)*$($Architecture)*"
+        }
+
+        if ($env:TEST_PYTHON_VERSIONS -eq $null) {
+            $PythonVersions = @("3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t")
+        } else {
+            $PythonVersions = @($env:TEST_PYTHON_VERSIONS.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries))
+        }
+
+        $Components = @(
+            "adbc_driver_manager",
+            "adbc_driver_flightsql",
+            "adbc_driver_postgresql",
+            "adbc_driver_sqlite"
+        )
+
+        foreach ($PythonVersion in $PythonVersions) {
+            if ($UseCondaForWheels) {
+                Test-PythonWheelsConda $PythonVersion
+            } else {
+                Test-PythonWheelsWithInterpreter $PythonVersion
+            }
+        }
+    } else {
+        Show-Header "Skipping Python Wheels"
+    }
+
+    if ($TestJars) {
+        Show-Header "Verify Java JARs"
+        if ($env:JAVA_HOME -eq $null) {
+            # Work around PowerShell < 7. Temporarily set ErrorActionPreference
+            # to continue to avoid the redirect below from stopping the script.
+            $PreviousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $env:JAVA_HOME = & java -XshowSettings:properties -version 2>&1 | Select-String "java.home" | ForEach-Object { $_.ToString().Split("=")[1].Trim() }
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+        echo "JAVA_HOME: $($env:JAVA_HOME)"
+
+        $RootPoms = @(Get-ChildItem -Path $BinaryDir -Filter "arrow-adbc-java-root-*.pom")
+        if ($RootPoms.Count -ne 1) {
+            throw "Expected exactly one Arrow ADBC Java root POM, found $($RootPoms.Count)"
+        }
+
+        $RootPomPath = $RootPoms[0].FullName
+        [xml] $RootPom = Get-Content -Raw $RootPomPath
+        $JavaVersion = $RootPom.project.version
+        echo "ADBC version: $($JavaVersion)"
+
+        $MavenRepository = Join-Path $ArrowTempDir "maven-repository"
+        New-Item -ItemType Directory -Force -Path $MavenRepository | Out-Null
+        $MavenRepositoryArgument = "-Dmaven.repo.local=$($MavenRepository)"
+
+        mvn -B install:install-file `
+            $MavenRepositoryArgument `
+            "-Dfile=$($RootPomPath)" `
+            "-DpomFile=$($RootPomPath)" `
+            "-Dpackaging=pom"
+        if (-not $?) { exit 1 }
+
+        $Artifacts = @(
+            "adbc-core",
+            "adbc-driver-flight-sql",
+            "adbc-driver-jdbc",
+            "adbc-driver-jni",
+            "adbc-driver-manager",
+            "adbc-sql"
+        )
+        foreach ($Artifact in $Artifacts) {
+            $ArtifactBase = Join-Path $BinaryDir "$($Artifact)-$($JavaVersion)"
+            $JarPath = "$($ArtifactBase).jar"
+            $PomPath = "$($ArtifactBase).pom"
+            $SourcesPath = "$($ArtifactBase)-sources.jar"
+            $JavadocPath = "$($ArtifactBase)-javadoc.jar"
+            foreach ($Path in @($JarPath, $PomPath, $SourcesPath, $JavadocPath)) {
+                if (-not (Test-Path -Path $Path -PathType Leaf)) {
+                    throw "Missing Java artifact: $($Path)"
+                }
+            }
+
+            mvn -B install:install-file `
+                $MavenRepositoryArgument `
+                "-Dfile=$($JarPath)" `
+                "-DpomFile=$($PomPath)" `
+                "-Dsources=$($SourcesPath)" `
+                "-Djavadoc=$($JavadocPath)"
+            if (-not $?) { exit 1 }
+        }
+
+        $JavaVerificationPom = Join-Path $PSScriptRoot "verify\java\pom.xml"
+        mvn -B test `
+            $MavenRepositoryArgument `
+            "-Dadbc.version=$($JavaVersion)" `
+            -f $JavaVerificationPom
+        if (-not $?) { exit 1 }
+    } else {
+        Show-Header "Skipping Java JARs"
+    }
+}
 
 Show-Header "Release candidate looks good!"

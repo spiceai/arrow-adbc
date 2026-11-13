@@ -23,6 +23,7 @@ update_versions() {
 
   local conda_version="${VERSION_NATIVE}"
   local csharp_version="${VERSION_CSHARP}"
+  local csharp_core_version="${VERSION_CSHARP_CORE}"
   local js_version="${VERSION_JS}"
   local linux_version="${RELEASE}"
   local rust_version="${VERSION_CSHARP}"
@@ -63,7 +64,8 @@ update_versions() {
   header "Updating versions for release ${RELEASE}"
   echo "C: ${c_version}"
   echo "Conda: ${conda_version}"
-  echo "C#: ${csharp_version}"
+  echo "C# (core): ${csharp_core_version}"
+  echo "C# (drivers): ${csharp_version}"
   echo "Docs: ${docs_version}"
   echo "GLib/Ruby: ${glib_version}"
   echo "Java: ${java_version}"
@@ -92,6 +94,10 @@ update_versions() {
 
   sed -i.bak \
     -E "s|<VersionPrefix>.+</VersionPrefix>|<VersionPrefix>${csharp_version}</VersionPrefix>|" \
+    "${ADBC_DIR}/csharp/Directory.Build.props"
+  rm "${ADBC_DIR}/csharp/Directory.Build.props.bak"
+  sed -i.bak \
+    -E "s|<AdbcCoreVersionPrefix>.+</AdbcCoreVersionPrefix>|<AdbcCoreVersionPrefix>${csharp_core_version}</AdbcCoreVersionPrefix>|" \
     "${ADBC_DIR}/csharp/Directory.Build.props"
   rm "${ADBC_DIR}/csharp/Directory.Build.props.bak"
   sed -i.bak \
@@ -223,7 +229,7 @@ set_resolved_issues() {
                                  --jq ".[] | select(.title | test(\"ADBC Libraries ${version}\$\"))")
     local -r milestone_number=$(echo "${milestone_info}" | jq -r '.number')
 
-    local -r graphql_query="query {
+    local -r resolved_issues_query="query {
     repository(owner: \"apache\", name: \"arrow-adbc\") {
         milestone(number: ${milestone_number}) {
             issues(states: CLOSED) {
@@ -234,8 +240,20 @@ set_resolved_issues() {
 }
 "
 
+    local -r merged_prs_query="query {
+  search(type: ISSUE, query: \"type:pr repo:apache/arrow-adbc milestone:\\\"ADBC Libraries ${version}\\\" -author:app/dependabot\") {
+    issueCount
+  }
+}"
+
+    local -r urlencoded=$(echo -n "ADBC Libraries ${version}" | jq -sRr @uri)
+    export ISSUES_URL="https://github.com/apache/arrow-adbc/issues?q=is%3Aissue%20state%3Aclosed%20milestone%3A%22${urlencoded}%22"
+    export PRS_URL="https://github.com/apache/arrow-adbc/pulls?q=is%3Apr%20state%3Aclosed%20milestone%3A%22${urlencoded}%22%20-author%3Aapp%2Fdependabot"
     export MILESTONE_URL=$(echo "${milestone_info}" | jq -r '.html_url')
     export RESOLVED_ISSUES=$(gh api graphql \
-                            -f query="${graphql_query}" \
+                            -f query="${resolved_issues_query}" \
                             --jq '.data.repository.milestone.issues.totalCount')
+    export MERGED_PRS=$(gh api graphql \
+                            -f query="${merged_prs_query}" \
+                            --jq '.data.search.issueCount')
 }

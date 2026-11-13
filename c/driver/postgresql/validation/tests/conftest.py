@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import adbc_drivers_validation.model
+import adbc_drivers_validation.tests.conftest
 import pytest
 from adbc_drivers_validation.tests.conftest import (  # noqa: F401
     conn,
@@ -26,18 +27,25 @@ from adbc_drivers_validation.tests.conftest import (  # noqa: F401
     db_kwargs,
     manual_test,
     noci,
-    pytest_addoption,
     pytest_collection_modifyitems,
 )
 
-from .postgresql import PostgreSQLQuirks
+from .postgresql import VENDORS, get_quirks
+
+
+def pytest_addoption(parser) -> None:
+    adbc_drivers_validation.tests.conftest.pytest_addoption(parser)
+    parser.addoption(
+        "--vendor",
+        choices=VENDORS,
+        default="postgresql",
+        help="PostgreSQL-compatible database vendor to validate",
+    )
 
 
 @pytest.fixture(scope="session")
 def driver(request) -> adbc_drivers_validation.model.DriverQuirks:
-    driver = request.param
-    assert driver.startswith("postgresql:")
-    return PostgreSQLQuirks()
+    return get_quirks(request.config.getoption("vendor"))
 
 
 @pytest.fixture(scope="session")
@@ -52,15 +60,14 @@ def driver_path(driver: adbc_drivers_validation.model.DriverQuirks) -> str:
 
     possible_paths = [
         # 1. c/build/driver/postgresql/ (CMake build from c/ directory)
-        base.parent.parent
-        / f"build/driver/{driver.name}/libadbc_driver_{driver.name}.{ext}",
+        base.parent.parent / f"build/driver/postgresql/libadbc_driver_postgresql.{ext}",
         # 2. <repo-root>/build/driver/postgresql/ (CI build location)
         base.parent.parent.parent
-        / f"build/driver/{driver.name}/libadbc_driver_{driver.name}.{ext}",
+        / f"build/driver/postgresql/libadbc_driver_postgresql.{ext}",
         # 3. c/driver/postgresql/build/ (local CMake build from driver dir)
-        base / f"build/libadbc_driver_{driver.name}.{ext}",
+        base / f"build/libadbc_driver_postgresql.{ext}",
         # 4. c/driver/postgresql/ (direct build output in driver dir)
-        base / f"libadbc_driver_{driver.name}.{ext}",
+        base / f"libadbc_driver_postgresql.{ext}",
     ]
 
     for path in possible_paths:
@@ -68,3 +75,10 @@ def driver_path(driver: adbc_drivers_validation.model.DriverQuirks) -> str:
             return str(path)
 
     return str(possible_paths[0])
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _setup_backend(request, conn_factory) -> None:  # noqa: F811
+    with conn_factory() as conn:  # noqa: F811
+        with conn.cursor() as cursor:
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS secondary")

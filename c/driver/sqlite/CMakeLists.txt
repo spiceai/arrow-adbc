@@ -52,6 +52,8 @@ if(NOT ADBC_SQLITE_WITH_LOAD_EXTENSION)
   set(ADBC_SQLITE_COMPILE_DEFINES "-DADBC_SQLITE_WITH_NO_LOAD_EXTENSION")
 endif()
 
+configure_file("config.h.in" "config.h" ESCAPE_QUOTES)
+
 add_arrow_lib(adbc_driver_sqlite
               SOURCES
               sqlite.cc
@@ -78,8 +80,11 @@ foreach(LIB_TARGET ${ADBC_LIBRARIES})
   target_compile_definitions(${LIB_TARGET} PRIVATE ADBC_EXPORTING
                                                    ${ADBC_SQLITE_COMPILE_DEFINES})
   target_include_directories(${LIB_TARGET} SYSTEM
-                             PRIVATE ${REPOSITORY_ROOT}/c/ ${REPOSITORY_ROOT}/c/include/
-                                     ${SQLite3_INCLUDE_DIRS} ${REPOSITORY_ROOT}/c/driver)
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${SQLite3_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${CMAKE_BINARY_DIR})
 
   if(NOT ADBC_DEFINE_COMMON_ENTRYPOINTS)
     target_compile_definitions(${LIB_TARGET} PRIVATE ${ADBC_TARGET_COMPILE_DEFINITIONS})
@@ -110,7 +115,7 @@ if(ADBC_BUILD_TESTS)
                 ${TEST_LINK_LIBS})
   target_compile_definitions(adbc-driver-sqlite-test
                              PRIVATE ${ADBC_SQLITE_COMPILE_DEFINES})
-  target_compile_features(adbc-driver-sqlite-test PRIVATE cxx_std_17)
+  target_compile_features(adbc-driver-sqlite-test PRIVATE cxx_std_20)
   target_include_directories(adbc-driver-sqlite-test SYSTEM
                              PRIVATE ${REPOSITORY_ROOT}/c/ ${REPOSITORY_ROOT}/c/include/
                                      ${LIBPQ_INCLUDE_DIRS} ${REPOSITORY_ROOT}/c/driver)

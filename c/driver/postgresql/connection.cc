@@ -45,6 +45,7 @@
 #include "driver/framework/objects.h"
 #include "driver/framework/utility.h"
 #include "error.h"
+#include "postgres_util.h"
 #include "result_helper.h"
 
 using adbc::driver::Result;
@@ -72,7 +73,8 @@ static const char* kCatalogQueryAll = "SELECT datname FROM pg_catalog.pg_databas
 // because it will always be the currently connected database.
 static const char* kSchemaQueryAll =
     "SELECT nspname FROM pg_catalog.pg_namespace WHERE "
-    "nspname !~ '^pg_' AND nspname <> 'information_schema'";
+    "(nspname !~ '^pg_' OR oid = pg_my_temp_schema()) "
+    "AND nspname <> 'information_schema'";
 
 // Parameterized on schema_name, relkind
 // Note that when binding relkind as a string it must look like {"r", "v", ...}
@@ -488,8 +490,9 @@ AdbcStatusCode PostgresConnection::Commit(struct AdbcError* error) {
 
   PGresult* result = PQexec(conn_, "COMMIT");
   if (PQresultStatus(result) != PGRES_COMMAND_OK) {
-    AdbcStatusCode code = SetError(error, result, "%s%s",
-                                   "[libpq] Failed to commit: ", PQerrorMessage(conn_));
+    AdbcStatusCode code =
+        MakeStatus(result, "[libpq] Failed to commit: {}", PQerrorMessage(conn_))
+            .ToAdbc(error);
     PQclear(result);
     return code;
   }
@@ -502,7 +505,7 @@ AdbcStatusCode PostgresConnection::EnsureTransaction(struct AdbcError* error) {
     return ADBC_STATUS_OK;
   }
   auto txstatus = PQtransactionStatus(conn_);
-  if (txstatus == PQTRANS_ACTIVE || txstatus == PQTRANS_INTRANS) {
+  if (txstatus == PQTRANS_INTRANS) {
     return ADBC_STATUS_OK;
   } else if (txstatus == PQTRANS_INERROR) {
     InternalAdbcSetError(error,
@@ -667,6 +670,8 @@ AdbcStatusCode PostgresConnection::GetOption(const char* option, char* value,
         output = "unknown";
         break;
     }
+  } else if (std::strcmp(option, ADBC_POSTGRESQL_OPTION_USE_COPY) == 0) {
+    output = use_copy_ ? ADBC_OPTION_VALUE_ENABLED : ADBC_OPTION_VALUE_DISABLED;
   } else {
     return ADBC_STATUS_NOT_FOUND;
   }
@@ -1129,6 +1134,7 @@ AdbcStatusCode PostgresConnection::Init(struct AdbcDatabase* database,
   database_ =
       *reinterpret_cast<std::shared_ptr<PostgresDatabase>*>(database->private_data);
   type_resolver_ = database_->type_resolver();
+  use_copy_ = database_->use_copy();
 
   RAISE_ADBC(database_->Connect(&conn_, error));
 
@@ -1263,6 +1269,22 @@ AdbcStatusCode PostgresConnection::SetOption(const char* key, const char* value,
         "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL {}", pg_level);
     PqResultHelper result_helper{conn_, query};
     RAISE_STATUS(error, result_helper.Execute());
+    return ADBC_STATUS_OK;
+  } else if (std::strcmp(key, ADBC_POSTGRESQL_OPTION_USE_COPY) == 0) {
+    if (!conn_) {
+      post_init_options_.emplace_back(key, value);
+      return ADBC_STATUS_OK;
+    }
+
+    if (std::strcmp(value, ADBC_OPTION_VALUE_ENABLED) == 0) {
+      use_copy_ = true;
+    } else if (std::strcmp(value, ADBC_OPTION_VALUE_DISABLED) == 0) {
+      use_copy_ = false;
+    } else {
+      InternalAdbcSetError(error, "%s%s%s%s", "[libpq] Invalid value for option ", key,
+                           ": ", value);
+      return ADBC_STATUS_INVALID_ARGUMENT;
+    }
     return ADBC_STATUS_OK;
   }
   InternalAdbcSetError(error, "%s%s", "[libpq] Unknown option ", key);

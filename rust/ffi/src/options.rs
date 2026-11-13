@@ -168,6 +168,25 @@ pub fn set_option_connection(
     key: impl AsRef<str>,
     value: OptionValue,
 ) -> Result<()> {
+    // SAFETY: The exclusive borrow keeps the handle alive and prevents concurrent access.
+    unsafe { set_option_connection_raw(driver, connection, version, key, value) }
+}
+
+/// Set an option through a raw connection handle.
+///
+/// # Safety
+///
+/// The handle must be valid for the driver and remain alive throughout this call.
+/// Ordinary operations on the handle must be serialized. Concurrent cancellation
+/// is permitted only as supported by the driver's ADBC cancellation contract.
+/// No references to the handle may conflict with accesses made by the driver.
+pub unsafe fn set_option_connection_raw(
+    driver: &FFI_AdbcDriver,
+    connection: *mut FFI_AdbcConnection,
+    version: AdbcVersion,
+    key: impl AsRef<str>,
+    value: OptionValue,
+) -> Result<()> {
     let key = CString::new(key.as_ref())?;
     let mut error = FFI_AdbcError::with_driver(driver);
     #[allow(unknown_lints)]
@@ -207,7 +226,6 @@ pub fn set_option_connection(
     check_status(status, error)
 }
 
-/// Sets one option on a statement.
 pub fn set_option_statement(
     driver: &FFI_AdbcDriver,
     statement: &mut FFI_AdbcStatement,
@@ -215,28 +233,18 @@ pub fn set_option_statement(
     key: impl AsRef<str>,
     value: OptionValue,
 ) -> Result<()> {
-    // SAFETY: the exclusive borrow proves the statement is alive for the call and
-    // not aliased by another statement function, which is what the raw form
-    // cannot check. It does not prove `private_data` refers to an initialized,
-    // unreleased statement — no signature here can, since the type is
-    // constructible with `Default` — and that obligation is the caller's, as it
-    // already is for every other driver call in this crate.
+    // SAFETY: The exclusive borrow keeps the handle alive and prevents concurrent access.
     unsafe { set_option_statement_raw(driver, statement, version, key, value) }
 }
 
-/// Sets one option on a statement addressed by raw pointer.
-///
-/// For callers that must not hold a `&mut` to the statement: a caller may have
-/// `AdbcStatementCancel` in flight on another thread, which the ADBC
-/// specification allows, and a `&mut` would make that concurrent access an
-/// aliasing violation.
+/// Set an option through a raw statement handle.
 ///
 /// # Safety
 ///
-/// `statement` must point to an initialized, not-yet-released statement that
-/// stays alive for the call, and the caller must serialize this call against
-/// every other statement function except `AdbcStatementCancel`, which the ADBC
-/// specification permits to run concurrently.
+/// The handle must be valid for the driver and remain alive throughout this call.
+/// Ordinary operations on the handle must be serialized. Concurrent cancellation
+/// is permitted only as supported by the driver's ADBC cancellation contract.
+/// No references to the handle may conflict with accesses made by the driver.
 pub unsafe fn set_option_statement_raw(
     driver: &FFI_AdbcDriver,
     statement: *mut FFI_AdbcStatement,

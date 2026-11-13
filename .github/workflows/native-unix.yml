@@ -81,7 +81,7 @@ jobs:
       # https://conda-forge.org/docs/maintainer/knowledge_base.html#newer-c-features-with-old-sdk
       CXXFLAGS: "-D_LIBCPP_DISABLE_AVAILABILITY"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -97,7 +97,7 @@ jobs:
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -106,7 +106,7 @@ jobs:
         run: |
           ./ci/scripts/remamba.sh install -c conda-forge \
             --file ci/conda_env_cpp.txt
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "${{ env.GO_VERSION }}"
           check-latest: true
@@ -141,7 +141,7 @@ jobs:
           cd
           tar czf ~/local.tgz local
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: driver-manager-${{ matrix.os }}
           retention-days: 3
@@ -162,7 +162,7 @@ jobs:
       # https://conda-forge.org/docs/maintainer/knowledge_base.html#newer-c-features-with-old-sdk
       CXXFLAGS: "-D_LIBCPP_DISABLE_AVAILABILITY"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -175,7 +175,7 @@ jobs:
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -221,7 +221,7 @@ jobs:
       matrix:
         os: ["ubuntu-latest"]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -232,14 +232,14 @@ jobs:
       - name: Get required Go version
         run: |
           (. .env && echo "GO_VERSION=${GO}") >> $GITHUB_ENV
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "${{ env.GO_VERSION }}"
           check-latest: true
           cache: true
           cache-dependency-path: go/adbc/go.sum
       - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
       - name: Install Meson via Python
@@ -283,7 +283,7 @@ jobs:
     name: "clang-tidy"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -296,7 +296,7 @@ jobs:
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -309,6 +309,10 @@ jobs:
 
       - name: clang-tidy
         run: |
+          # conda-forge changed compilers to inject includes internally
+          # instead of doing things like setting CXXARGS, so now we need to
+          # explicitly tell clang-tidy the include path
+          export ADBC_CLANG_TIDY_ARGS="-extra-arg=-isystem${CONDA_PREFIX}/include"
           ./ci/scripts/cpp_clang_tidy.sh "$(pwd)" "$(pwd)/build"
 
   # ------------------------------------------------------------
@@ -329,7 +333,7 @@ jobs:
       # https://conda-forge.org/docs/maintainer/knowledge_base.html#newer-c-features-with-old-sdk
       CXXFLAGS: "-D_LIBCPP_DISABLE_AVAILABILITY"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -342,7 +346,7 @@ jobs:
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -358,7 +362,7 @@ jobs:
         run: |
           sudo sysctl vm.mmap_rnd_bits=28
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: driver-manager-${{ matrix.os }}
           path: "~"
@@ -401,7 +405,7 @@ jobs:
       contents: 'read'
       id-token: 'write'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -410,7 +414,7 @@ jobs:
       # the 'toolchain' parameter and staticcheck tends to need the latest Go
       - id: toolchain
         run: echo "GO_VERSION=$(sed -n 's/^toolchain go//p' go/adbc/go.mod)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.toolchain.outputs.GO_VERSION }}
           check-latest: true
@@ -429,7 +433,7 @@ jobs:
           ./ci/scripts/go_test.sh "$(pwd)" "$(pwd)/build" "$HOME/local"
 
   go-conda:
-    name: "Go (CGO) (Conda/${{ matrix.os }})"
+    name: "Go (CGO) (Conda/${{ matrix.os }}, workspace: ${{ matrix.workspace }})"
     runs-on: ${{ matrix.os }}
     needs:
       - drivers-build-conda
@@ -443,13 +447,19 @@ jobs:
             goarch: arm64
           - os: ubuntu-latest
             goarch: x64
+          - os: macos-latest
+            goarch: arm64
+            workspace: true
+          - os: ubuntu-latest
+            goarch: x64
+            workspace: true
     env:
       CGO_ENABLED: "1"
     permissions:
       contents: 'read'
       id-token: 'write'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -465,7 +475,7 @@ jobs:
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -479,14 +489,14 @@ jobs:
         run: |
           ./ci/scripts/remamba.sh install -c conda-forge \
             --file ci/conda_env_cpp.txt
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "${{ env.GO_VERSION }}"
           check-latest: true
           cache: true
           cache-dependency-path: go/adbc/go.sum
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: driver-manager-${{ matrix.os }}
           path: "~"
@@ -495,6 +505,14 @@ jobs:
         run: |
           cd
           tar xvf ~/local.tgz
+
+      # Ensure the drivers build against local go/adbc module, too
+      - name: Create go.work
+        if: matrix.workspace
+        run: |
+          go work init
+          go work use ./go/adbc
+          go work use ./go/driver
 
       - name: Go Build
         run: |
@@ -517,13 +535,14 @@ jobs:
     strategy:
       matrix:
         os: ["macos-15-intel", "macos-latest", "ubuntu-latest"]
-        python: ["3.10", "3.14"]
+        # TODO(lidavidm): 3.14 -> 3.15 once conda packages are available
+        python: ["3.11", "3.14"]
     env:
       # Required for macOS
       # https://conda-forge.org/docs/maintainer/knowledge_base.html#newer-c-features-with-old-sdk
       CXXFLAGS: "-D_LIBCPP_DISABLE_AVAILABILITY"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -539,29 +558,32 @@ jobs:
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
           use-mamba: true
       - name: Install Dependencies
         run: |
+          # N.B. explicitly install a compiler package which will cause the
+          # Conda environment to set CC/CXX
           ./ci/scripts/remamba.sh install -c conda-forge \
             python=${{ matrix.python }} \
             --file ci/conda_env_cpp.txt \
-            --file ci/conda_env_python.txt
+            --file ci/conda_env_python.txt \
+            ${{ (runner.os == 'Linux' && 'gcc gxx') || 'clang clangxx' }}
       - name: Work around ASAN issue (GH-1617)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo sysctl vm.mmap_rnd_bits=28
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "${{ env.GO_VERSION }}"
           check-latest: true
           cache: true
           cache-dependency-path: go/adbc/go.sum
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: driver-manager-${{ matrix.os }}
           path: "~"
@@ -609,10 +631,10 @@ jobs:
         run: |
           export PATH=$RUNNER_TOOL_CACHE/go/${GO_VERSION}/x64/bin:$PATH
           # Can't use Docker on macOS
-          pushd $(pwd)/go/adbc
-          go build -o testserver ./driver/flightsql/cmd/testserver
+          pushd $(pwd)/go/driver/flightsql
+          go build -o testserver ./cmd/testserver
           popd
-          $(pwd)/go/adbc/testserver -host 0.0.0.0 -port 41414 &
+          $(pwd)/go/driver/flightsql/testserver -host 0.0.0.0 -port 41414 &
           while ! curl --http2-prior-knowledge -H "content-type: application/grpc" -v localhost:41414 -XPOST;
           do
               echo "Waiting for test server..."
@@ -647,9 +669,10 @@ jobs:
     strategy:
       matrix:
         os: ["ubuntu-latest"]
+        # TODO(lidavidm): 3.14 -> 3.15 once conda packages are available
         python: ["3.14"]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -662,7 +685,7 @@ jobs:
         with:
           path: ~/conda_pkgs_dir
           key: conda-${{ runner.os }}-${{ steps.get-date.outputs.today }}-${{ env.CACHE_NUMBER }}-${{ hashFiles('ci/**') }}
-      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5  # v4.0.1
+      - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         with:
           miniforge-version: latest
           use-only-tar-bz2: false
@@ -678,7 +701,7 @@ jobs:
         run: |
           sudo sysctl vm.mmap_rnd_bits=28
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: driver-manager-${{ matrix.os }}
           path: "~"
@@ -715,7 +738,7 @@ jobs:
         run: |
           ./ci/scripts/docs_build.sh "$(pwd)"
       - name: Archive docs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docs
           retention-days: 2

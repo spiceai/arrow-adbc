@@ -27,8 +27,9 @@ adbc_postgres_driver_lib = library(
         'result_helper.cc',
         'result_reader.cc',
         'statement.cc',
+        'type_resolver_init.cc',
     ],
-    include_directories: [include_dir, c_dir, safe_math_dir],
+    include_directories: [include_dir, c_dir, driver_dir, safe_math_dir],
     link_with: [adbc_common_lib, adbc_framework_lib],
     dependencies: [nanoarrow_dep, fmt_dep, libpq_dep],
 )
@@ -70,7 +71,7 @@ foreach name, conf : postgres_tests
         sources: conf['sources'],
         include_directories: [include_dir, driver_dir, c_dir, safe_math_dir],
         link_with: [adbc_common_lib, adbc_postgres_driver_lib],
-        dependencies: [libpq_dep, adbc_validation_dep],
+        dependencies: [libpq_dep, adbc_validation_dep, fmt_dep],
         cpp_args: cpp_args,
     )
     test('adbc-' + name, exc)

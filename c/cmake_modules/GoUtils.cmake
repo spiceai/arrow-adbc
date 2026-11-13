@@ -179,6 +179,9 @@ function(add_go_lib GO_MOD_DIR GO_LIBNAME)
   list(APPEND GO_ENV_VARS "CGO_ENABLED=1")
   list(APPEND GO_ENV_VARS "CGO_CFLAGS=${GO_FLAGS}")
   list(APPEND GO_ENV_VARS "CGO_CXXFLAGS=${GO_FLAGS}")
+  if(NOT "${ADBC_GO_CC}" STREQUAL "")
+    list(APPEND GO_ENV_VARS "CC=${ADBC_GO_CC}")
+  endif()
 
   if(BUILD_SHARED)
     set(LIB_NAME_SHARED
@@ -193,7 +196,7 @@ function(add_go_lib GO_MOD_DIR GO_LIBNAME)
       set(EXTLDFLAGS ",--version-script=${REPOSITORY_ROOT}/c/symbols.map")
     endif()
 
-    if(NOT APPLE)
+    if(NOT APPLE AND NOT WIN32)
       set(EXTLDFLAGS "${EXTLDFLAGS},-soname,${LIB_NAME_SHARED}.${ADBC_SO_VERSION}")
     endif()
 

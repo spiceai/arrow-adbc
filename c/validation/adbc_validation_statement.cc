@@ -85,6 +85,43 @@ void StatementTest::TestRelease() {
   ASSERT_EQ(NULL, statement.private_data);
 }
 
+namespace {
+
+bool CanCompareIngestValues(ArrowType input, ArrowType output) {
+  if (input == output) return true;
+
+  switch (input) {
+    case NANOARROW_TYPE_BOOL:
+      return output == NANOARROW_TYPE_INT8 || output == NANOARROW_TYPE_INT16 ||
+             output == NANOARROW_TYPE_INT32 || output == NANOARROW_TYPE_INT64;
+    case NANOARROW_TYPE_INT8:
+    case NANOARROW_TYPE_UINT8:
+      return output == NANOARROW_TYPE_INT16 || output == NANOARROW_TYPE_INT32 ||
+             output == NANOARROW_TYPE_INT64;
+    case NANOARROW_TYPE_INT16:
+    case NANOARROW_TYPE_UINT16:
+      return output == NANOARROW_TYPE_INT32 || output == NANOARROW_TYPE_INT64;
+    case NANOARROW_TYPE_INT32:
+    case NANOARROW_TYPE_UINT32:
+      return output == NANOARROW_TYPE_INT64;
+    case NANOARROW_TYPE_HALF_FLOAT:
+      return output == NANOARROW_TYPE_FLOAT || output == NANOARROW_TYPE_DOUBLE;
+    case NANOARROW_TYPE_FLOAT:
+      return output == NANOARROW_TYPE_DOUBLE;
+    case NANOARROW_TYPE_LARGE_STRING:
+    case NANOARROW_TYPE_STRING_VIEW:
+      return output == NANOARROW_TYPE_STRING;
+    case NANOARROW_TYPE_LARGE_BINARY:
+    case NANOARROW_TYPE_BINARY_VIEW:
+    case NANOARROW_TYPE_FIXED_SIZE_BINARY:
+      return output == NANOARROW_TYPE_BINARY;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 template <typename CType>
 void StatementTest::TestSqlIngestType(SchemaField field,
                                       const std::vector<std::optional<CType>>& values,
@@ -175,8 +212,7 @@ void StatementTest::TestSqlIngestType(SchemaField field,
     ASSERT_EQ(values.size(), reader.array->length);
     ASSERT_EQ(1, reader.array->n_children);
 
-    if (round_trip_field.type == field.type) {
-      // XXX: for now we can't compare values; we would need casting
+    if (CanCompareIngestValues(field.type, round_trip_field.type)) {
       ASSERT_NO_FATAL_FAILURE(
           CompareArray<CType>(reader.array_view->children[0], values));
     }
@@ -247,10 +283,6 @@ void StatementTest::TestSqlIngestInt64() {
 }
 
 void StatementTest::TestSqlIngestFloat16() {
-  if (!quirks()->supports_ingest_float16()) {
-    GTEST_SKIP();
-  }
-
   ASSERT_NO_FATAL_FAILURE(TestSqlIngestNumericType<float>(NANOARROW_TYPE_HALF_FLOAT));
 }
 
@@ -316,11 +348,16 @@ void StatementTest::TestSqlIngestBinaryView() {
   }
 
   ASSERT_NO_FATAL_FAILURE(TestSqlIngestType<std::vector<std::byte>>(
-      NANOARROW_TYPE_LARGE_BINARY,
-      {std::nullopt, std::vector<std::byte>{},
+      NANOARROW_TYPE_BINARY_VIEW,
+      {std::nullopt,
+       // Empty vectors trigger a null-pointer memcpy in nanoarrow.
+       // TODO: Restore after vendoring the fix:
+       // https://github.com/apache/arrow-nanoarrow/pull/940
+       // std::vector<std::byte>{},
        std::vector<std::byte>{std::byte{0x00}, std::byte{0x01}},
        std::vector<std::byte>{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
                               std::byte{0x04}},
+       std::vector<std::byte>(32, std::byte{0x05}),
        std::vector<std::byte>{std::byte{0xfe}, std::byte{0xff}}},
       false));
 }

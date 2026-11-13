@@ -17,6 +17,12 @@
 
 sqlite3_dep = dependency('sqlite3')
 
+configure_file(
+    input: 'config.h.in',
+    output: 'config.h',
+    configuration: {'ADBC_VERSION': meson.project_version()},
+)
+
 time_t_size = meson.get_compiler('c').sizeof(
     'time_t',
     prefix: '#include <sys/types.h>',
@@ -49,6 +55,6 @@ exc = executable(
     sources: ['sqlite_test.cc'],
     include_directories: [include_dir, c_dir, driver_dir],
     link_with: [adbc_common_lib, adbc_sqlite3_driver_lib],
-    dependencies: [sqlite3_dep, adbc_validation_dep],
+    dependencies: [sqlite3_dep, adbc_validation_dep, fmt_dep],
 )
 test('adbc-driver-sqlite', exc)

@@ -117,6 +117,30 @@ def test_get_objects(sqlite) -> None:
 
 
 @pytest.mark.sqlite
+def test_get_objects_table_types_filter(sqlite) -> None:
+    with sqlite.cursor() as cur:
+        cur.execute("CREATE TABLE base (ints)")
+        cur.execute("CREATE VIEW derived AS SELECT * FROM base")
+
+    def table_names(table_types_filter):
+        metadata = (
+            sqlite.adbc_get_objects(table_types_filter=table_types_filter)
+            .read_all()
+            .to_pylist()
+        )
+        return sorted(
+            table["table_name"]
+            for catalog in metadata
+            for schema in catalog["catalog_db_schemas"]
+            for table in schema["db_schema_tables"]
+        )
+
+    assert table_names(["table"]) == ["base"]
+    assert table_names(["view"]) == ["derived"]
+    assert table_names(["table", "view"]) == ["base", "derived"]
+
+
+@pytest.mark.sqlite
 def test_get_table_schema(sqlite) -> None:
     with sqlite.cursor() as cur:
         cur.execute("CREATE TABLE temporary (ints)")
@@ -720,6 +744,44 @@ def test_close_connection_suppresses_cursor_close_error() -> None:
 
     # Verify the real cursor is also closed
     assert real_cursor._closed
+
+
+def test_requires_pyarrow_late_install(monkeypatch) -> None:
+    """Test that _requires_pyarrow recovers if PyArrow becomes available
+    after import."""
+    # Simulate the state where PyArrow wasn't available at module load time
+    monkeypatch.setattr(dbapi, "_has_pyarrow", False)
+    monkeypatch.delattr(dbapi, "_reader", raising=False)
+    monkeypatch.delattr(dbapi, "pyarrow", raising=False)
+
+    # Should not raise because PyArrow is actually importable now
+    dbapi._requires_pyarrow()
+
+    # The flag should be updated so subsequent calls don't re-import
+    assert dbapi._has_pyarrow is True
+    # The _reader Cython extension should now be available at module level
+    assert hasattr(dbapi, "_reader")
+    assert hasattr(dbapi._reader, "AdbcRecordBatchReader")
+    # pyarrow must be in module globals for callers that use it directly
+    assert hasattr(dbapi, "pyarrow")
+
+
+def test_requires_pyarrow_truly_missing(monkeypatch) -> None:
+    """Test that _requires_pyarrow still raises when PyArrow is genuinely missing."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name.startswith("pyarrow"):
+            raise ImportError("mocked")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(dbapi, "_has_pyarrow", False)
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+
+    with pytest.raises(dbapi.ProgrammingError, match="requires PyArrow"):
+        dbapi._requires_pyarrow()
 
 
 @pytest.mark.sqlite
